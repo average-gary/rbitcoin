@@ -49,6 +49,7 @@ into `AGENTS.md`.
 | [`overlay-functional.md`](./overlay-functional.md) | Private Tor / i2pd / cjdns mesh harness (labeled / nightly). |
 | [`how-we-plan.md`](./how-we-plan.md) | Agent contract (cycle, Agent RAM, keep-compiling), then human rationale. |
 | [`personal-node-plans/`](./personal-node-plans/) | Home-node implementation plan group (SOCKS, overlays, wallet onions, ephemeral broadcast, seqsigwit prune / `NETWORK_LIMITED`). Live flags stay OPERATOR/COMPAT when a slice ships. Do not copy step lists into quality.md until scheduled. |
+| [`sv2-template-provider.md`](./sv2-template-provider.md) | SV2 Template Distribution Protocol server plan (**Q-64**). Live flags/COMPAT rows land in OPERATOR/COMPAT when a slice ships. |
 | [`releases.md`](./releases.md) | Tag `vX.Y.Z`, `vX.Y.x` patch line, `.99` bump, Highlights / GitHub notes. |
 | [`code-shape.md`](./code-shape.md) | Control flow, types, naming, composition (CONTRIBUTING principle 10). Named extracts: quality.md **Q-61** (Completed). Clippy: no workspace `allow` list; leftover lints are site-local with a reason. |
 | [`quality.md`](./quality.md) | Living quality roadmap (Open + Won't-fix + Parked + Protect). |

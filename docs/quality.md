@@ -35,6 +35,7 @@ Counts and procedures stay in the owner doc. A row is the rank and the outcome.
 | 5 | **Q-67** | `asked_blocks` clone on hold | `hold_body` clones `asked_blocks` before `held_bodies` insert so the read lock does not overlap the write (`HeldBodies::insert` already takes `&HashSet`). Bound is `MAX_SERVE_BLOCKS` × peers. Follow-up: pass the read guard with a documented lock order, or keep the clone as a named trade. Owner: `crates/rbitcoin-net/src/chain.rs`. |
 | 6 | **Q-69** | CLN / LDK chain backend | Operator can point CLN `bcli` and ldk-node Esplora/Electrum at this node. Owner: [`lightning.md`](./lightning.md). |
 | 7 | **Q-70** | Batch lookup-path hit counters if a profile names them | `head_resolve_stats::add_hit_rank` does two relaxed `fetch_add`s per resolved txid (`head_resolve_denserels`, `tx_table`). SH extract collect flushes output and hit counts once per fk batch, not per output. Still once per event: `accepted_wb` (`SeqCst`, per confirmed block), `serve_perf::note_serve` (per historical getdata), `page_ios` (per SH page read). Done: a profile shows `add_hit_rank` on confirm lookup and those counters flush per batch, or the profile shows the line is noise and this row moves to Won't-fix. `add_hit_ages` is already a batched flush; `add_hit_age` remains the one-bucket path. |
+| 8 | **Q-64** | SV2 template provider (TDP server) | Node serves Noise-encrypted Template Distribution Protocol in-process: `CoinbaseOutputConstraints` → pushed `NewTemplate` / `SetNewPrevHash` on tip change and fee delta, `RequestTransactionData`, `SubmitSolution` → `accept_block`. Plan and steps: [`sv2-template-provider.md`](./sv2-template-provider.md). |
 
 R-ids were the 2026-08-12 slice. Canonical id is **bold**. Do not start
 **R-11+**. Next unused Q-id is **Q-71**.
@@ -83,7 +84,7 @@ just not the current product. COMPAT/OPERATOR stay the shipped contract.
 | ID | Item | Why parked | Reopen when |
 |----|------|------------|-------------|
 | **Q-63** | Electrum TLS (50002) + Tor onion **in the binary** | Home Sparrow/phone off-LAN today uses nginx (`OPERATOR.md`). Node stays plain TCP. | Operators refuse a reverse proxy, or a first-class onion listener is the 1.0 install. |
-| **Q-64** | GBT longpoll / `waitNext` (then Sv2 template provider) | Opt-in `getblocktemplate` + Esplora `/block-template` with 15 s cache is the mining extra. No stratum/pool. | DATUM / Bitaxe / mkpool users need push templates; IPC mining interface is the Core shape. |
+
 | **Q-65** | BIP157/158 compact block filters (`peerblockfilters` / `getblockfilter`) | Electrum + Esplora (exact scripthash) is the wallet path. P2P filter short IDs stay decode-reject (`COMPAT.md`). | Neutrino / LDK-node on *this* node without handing every address to Electrum. |
 
 ---
