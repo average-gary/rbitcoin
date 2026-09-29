@@ -441,6 +441,17 @@ Ships the listener, bootstrap, tip push, transaction data, and
   a bad checksum names the knob without echoing the key.
 - **Green:** `parse_authority_sec` falls back to base58check.
 
+### B8e — Authority secret never prints
+
+- **Contract:** `NodeConfig` `Debug` masks the authority secret, and a
+  `sv2_tp_authority_sec_file` read error names the knob and the IO error
+  without the path: an operator who passes the key to the file knob must
+  not see it logged.
+- **Red:** node lib `sv2_tp_authority_secret_never_prints`: the config
+  `Debug` and the error for the hex key given as a path hold no key bytes.
+- **Green:** `Sv2AuthoritySecret` newtype with a masking `Debug` (the
+  `TorControlOpts` password precedent); the file error drops the path.
+
 ---
 
 ## Plan C — Fee-delta push

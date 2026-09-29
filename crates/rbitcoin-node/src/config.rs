@@ -236,6 +236,16 @@ impl std::fmt::Debug for TorControlOpts {
     }
 }
 
+/// SV2 authority secret key; `Debug` never prints it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Sv2AuthoritySecret(pub [u8; 32]);
+
+impl std::fmt::Debug for Sv2AuthoritySecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("****")
+    }
+}
+
 /// JSON-RPC listen and auth.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RpcOpts {
@@ -319,7 +329,7 @@ pub struct NodeConfig {
     /// SV2 Template Provider bind (`--sv2-tp-listen`). Default off.
     pub sv2_tp_listen: Option<SocketAddr>,
     /// Authority secret key the TP signs its Noise certificates with.
-    pub sv2_tp_authority_sec: Option<[u8; 32]>,
+    pub sv2_tp_authority_sec: Option<Sv2AuthoritySecret>,
     /// Validity of each per-connection Noise certificate. Default 3600 s.
     pub sv2_tp_cert_validity_secs: u64,
     /// How long a template on a replaced tip still answers. Default 10 s.
@@ -1095,7 +1105,8 @@ impl NodeConfig {
             // Keeps the secret out of argv and the unit file.
             "sv2_tp_authority_sec_file" => {
                 let hex = std::fs::read_to_string(val).map_err(|e| {
-                    NodeError::Config(format!("conf sv2_tp_authority_sec_file {val}: {e}"))
+                    // The path may be the key pasted into the wrong knob: never echo it.
+                    NodeError::Config(format!("conf sv2_tp_authority_sec_file: {e}"))
                 })?;
                 self.sv2_tp_authority_sec = Some(parse_authority_sec(&key_l, hex.trim())?);
             }
@@ -1452,11 +1463,12 @@ fn is_conf_true(val: &str) -> bool {
 /// Parse `1`/`true`/`yes`/`on` → true; `0`/`false`/`no`/`off` → false.
 /// The error never echoes `val`: it is a secret.
 /// 64 hex, or SRI `key-utils` `Secp256k1SecretKey` base58check (the raw 32 bytes).
-fn parse_authority_sec(key: &str, val: &str) -> Result<[u8; 32], NodeError> {
+fn parse_authority_sec(key: &str, val: &str) -> Result<Sv2AuthoritySecret, NodeError> {
     <[u8; 32]>::from_hex(val)
         .ok()
         .or_else(|| bitcoin::base58::decode_check(val).ok()?.try_into().ok())
         .filter(|k| bitcoin::secp256k1::SecretKey::from_slice(k).is_ok())
+        .map(Sv2AuthoritySecret)
         .ok_or_else(|| {
             NodeError::Config(format!(
                 "conf {key}: want a secp256k1 secret key (64 hex or key-utils base58check)"
@@ -1631,7 +1643,7 @@ mod tests {
                 .unwrap(),
             ConfApply::Applied
         );
-        assert_eq!(c.sv2_tp_authority_sec, Some([7; 32]));
+        assert_eq!(c.sv2_tp_authority_sec, Some(Sv2AuthoritySecret([7; 32])));
         assert!(c.validate().is_ok());
 
         let zero = "00".repeat(32);
@@ -1661,7 +1673,7 @@ mod tests {
             c.apply_kv("sv2_tp_authority_sec_file", path).unwrap(),
             ConfApply::Applied
         );
-        assert_eq!(c.sv2_tp_authority_sec, Some([7; 32]));
+        assert_eq!(c.sv2_tp_authority_sec, Some(Sv2AuthoritySecret([7; 32])));
 
         let bad = dir.join("sv2-bad.key");
         std::fs::write(&bad, "00".repeat(32)).unwrap();
@@ -1675,6 +1687,26 @@ mod tests {
             assert!(e.contains("sv2_tp_authority_sec_file"), "{e}");
             assert!(!e.contains(&"00".repeat(32)), "never echo the key: {e}");
         }
+    }
+
+    /// An operator who passes the key itself to the file knob, or logs the
+    /// config, must not see the key printed.
+    #[test]
+    fn sv2_tp_authority_secret_never_prints() {
+        let hex = "07".repeat(32);
+        let mut c = NodeConfig::default();
+        c.apply_kv("sv2_tp_authority_sec", &hex).unwrap();
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("sv2_tp_authority_sec"), "{dbg}");
+        assert!(!dbg.contains("[7, 7"), "never print the key: {dbg}");
+        assert!(!dbg.contains(&hex), "never print the key: {dbg}");
+
+        let e = format!(
+            "{}",
+            c.apply_kv("sv2_tp_authority_sec_file", &hex).unwrap_err()
+        );
+        assert!(e.contains("sv2_tp_authority_sec_file"), "{e}");
+        assert!(!e.contains(&hex), "never echo the key: {e}");
     }
 
     /// key-utils 1.2.0 vector: SRI configs carry the authority secret as
@@ -1694,7 +1726,7 @@ mod tests {
             assert_eq!(c.apply_kv(k, v).unwrap(), ConfApply::Applied);
             let kp = bitcoin::secp256k1::Keypair::from_seckey_slice(
                 &bitcoin::secp256k1::Secp256k1::new(),
-                &c.sv2_tp_authority_sec.unwrap(),
+                &c.sv2_tp_authority_sec.unwrap().0,
             )
             .unwrap();
             let mut pk = vec![1, 0];

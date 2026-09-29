@@ -1745,7 +1745,7 @@ async fn start_esplora_if_ready(
 
 async fn start_sv2_tp(config: &NodeConfig, hub: &Arc<ChainHub>) -> Option<Sv2TpHandle> {
     let listen = config.sv2_tp_listen?;
-    let authority_secret = config.sv2_tp_authority_sec?;
+    let authority_secret = config.sv2_tp_authority_sec?.0;
     let cfg = Sv2TpConfig {
         listen,
         chain: Arc::clone(hub),

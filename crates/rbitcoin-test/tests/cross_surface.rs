@@ -8,7 +8,7 @@ use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{Amount, OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 use rbitcoin_consensus::{accept_and_connect_block, pad_empty_from, ChainParams, Milestone};
 use rbitcoin_electrum::electrum_scripthash_hex;
-use rbitcoin_node::{run_p2p, NodeConfig};
+use rbitcoin_node::{run_p2p, NodeConfig, Sv2AuthoritySecret};
 use rbitcoin_primitives::{Height, Network};
 use rbitcoin_query::Query;
 use rbitcoin_test::{build_mature_regtest_with_spend, TestDatadir};
@@ -2869,7 +2869,7 @@ async fn sv2_tp_bootstrap() {
     cfg.listen.connect.clear();
     cfg.rpc.listen = Some(rpc_addr);
     cfg.sv2_tp_listen = Some(sv2_addr);
-    cfg.sv2_tp_authority_sec = Some(SV2_AUTHORITY_SEC);
+    cfg.sv2_tp_authority_sec = Some(Sv2AuthoritySecret(SV2_AUTHORITY_SEC));
     cfg.sv2_tp_stale_grace_secs = 1;
     std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
     cfg.max_run_secs = Some(60);
