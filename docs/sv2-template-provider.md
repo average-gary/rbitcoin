@@ -284,11 +284,13 @@ Ships the listener, bootstrap, tip push, transaction data, and
 
 - **Contract:** a live `template_id` →
   `RequestTransactionData.Success{template_id, excess_data: "",
-  transaction_list}` with the witness-serialized txs in template order;
-  unknown id → `RequestTransactionData.Error{error_code:
-  "template-id-not-found"}`.
+  transaction_list}` with the witness-serialized txs in template order.
+  A session retains its last 3 templates; an id it was sent but dropped →
+  `RequestTransactionData.Error{error_code: "stale-template-id"}`, an id
+  never sent → `"template-id-not-found"`.
 - **Red:** extend the B4b journey: request the served template's data,
-  assert count/order/bytes against the mempool txs; unknown-id error.
+  assert count/order/bytes against the mempool txs; unknown-id and
+  dropped-id errors.
 - **Green:** per-session template map retaining the witness-serialized
   txs (the named RAM trade), and its read path.
 - **Refactor:** none expected.

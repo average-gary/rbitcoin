@@ -4,7 +4,7 @@
 use binary_sv2::{Seq0255, B0255, B064K, U256};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash;
-use bitcoin::{Amount, ScriptBuf, Target, TxOut};
+use bitcoin::{Amount, ScriptBuf, Target, Transaction, TxOut};
 use rbitcoin_consensus::{
     bip34_height_script, block_subsidy, expected_next_bits, median_time_past,
     witness_commitment_script, MAX_BLOCK_WEIGHT,
@@ -31,6 +31,8 @@ pub(crate) struct Template {
     pub n_bits: u32,
     /// `n_bits` expanded, little-endian (no weak-block target).
     pub target: [u8; 32],
+    /// Non-coinbase txs in block order, kept past mempool eviction.
+    pub txs: Vec<Transaction>,
 }
 
 impl Template {
@@ -127,5 +129,6 @@ pub(crate) fn build(
         header_timestamp,
         n_bits: bits.to_consensus(),
         target: Target::from_compact(bits).to_le_bytes(),
+        txs: selected.into_iter().map(|(tx, _)| tx).collect(),
     })
 }

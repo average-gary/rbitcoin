@@ -6,7 +6,8 @@ use common_messages_sv2::{Protocol, SetupConnection, MESSAGE_TYPE_SETUP_CONNECTI
 use std::io;
 use std::net::SocketAddr;
 use template_distribution_sv2::{
-    CoinbaseOutputConstraints, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS,
+    CoinbaseOutputConstraints, RequestTransactionData, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS,
+    MESSAGE_TYPE_REQUEST_TRANSACTION_DATA,
 };
 use tokio::net::TcpStream;
 
@@ -62,6 +63,13 @@ impl TpClient {
         };
         self.conn
             .send(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS, msg)
+            .await
+    }
+
+    pub async fn request_transaction_data(&mut self, template_id: u64) -> io::Result<()> {
+        let msg = RequestTransactionData { template_id };
+        self.conn
+            .send(MESSAGE_TYPE_REQUEST_TRANSACTION_DATA, msg)
             .await
     }
 

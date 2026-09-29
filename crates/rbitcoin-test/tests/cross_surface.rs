@@ -2791,6 +2791,29 @@ fn sv2_template(mut f: rbitcoin_sv2::Frame) -> Sv2Template {
     }
 }
 
+fn sv2_tx_data(mut f: rbitcoin_sv2::Frame) -> (u64, Vec<u8>, Vec<Vec<u8>>) {
+    use template_distribution_sv2::{
+        RequestTransactionDataSuccess, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS,
+    };
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    let d: RequestTransactionDataSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    let txs = d
+        .transaction_list
+        .iter()
+        .map(|t| t.as_ref().to_vec())
+        .collect();
+    (d.template_id, d.excess_data.as_ref().to_vec(), txs)
+}
+
+fn sv2_tx_data_error(mut f: rbitcoin_sv2::Frame) -> (u64, String) {
+    use template_distribution_sv2::{
+        RequestTransactionDataError, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
+    };
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    (e.template_id, e.error_code.as_utf8_or_hex())
+}
+
 /// An SV2 client on a node whose chain is stale: no template until a fresh
 /// tip ends IBD, then the pair on the RPC tip, then a non-future template
 /// carrying a transaction sent over RPC.
@@ -2879,6 +2902,34 @@ async fn sv2_tp_bootstrap() {
     assert!(t2.template_id > t.template_id);
     assert_eq!(t2.value_remaining, t.value_remaining + fee);
     assert_eq!(t2.merkle_path, [tx.compute_txid().to_byte_array()]);
+
+    // Served from the session's retained template, witness-serialized.
+    c.request_transaction_data(t2.template_id).await.unwrap();
+    let (id, excess, txs) = sv2_tx_data(sv2_recv(&mut c).await);
+    assert_eq!(id, t2.template_id);
+    assert!(excess.is_empty());
+    assert_eq!(txs, [bitcoin::consensus::encode::serialize(&tx)]);
+    c.request_transaction_data(t.template_id).await.unwrap();
+    assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).2.len(), 0);
+    c.request_transaction_data(t2.template_id + 100)
+        .await
+        .unwrap();
+    assert_eq!(
+        sv2_tx_data_error(sv2_recv(&mut c).await),
+        (t2.template_id + 100, "template-id-not-found".to_string())
+    );
+    // Three templates retained per session: the oldest is now stale.
+    for _ in 0..2 {
+        c.coinbase_output_constraints(0, 0).await.unwrap();
+        sv2_template(sv2_recv(&mut c).await);
+    }
+    c.request_transaction_data(t.template_id).await.unwrap();
+    assert_eq!(
+        sv2_tx_data_error(sv2_recv(&mut c).await),
+        (t.template_id, "stale-template-id".to_string())
+    );
+    c.request_transaction_data(t2.template_id).await.unwrap();
+    assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).2.len(), 1);
 
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;
