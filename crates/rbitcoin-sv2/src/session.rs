@@ -281,20 +281,6 @@ impl Session {
             rbitcoin_log::info!("sv2: SubmitSolution for unknown template {}", m.template_id);
             return Ok(());
         };
-        // The client may roll time forward from the sent timestamp by at
-        // most the wall time since it was sent.
-        let (sent_ts, sent_at) = r.prev_sent;
-        let rolled =
-            u64::try_from(sent_at.elapsed().as_millis().div_ceil(1000)).unwrap_or(u64::MAX);
-        if u64::from(m.header_timestamp) < u64::from(sent_ts)
-            || u64::from(m.header_timestamp) > u64::from(sent_ts).saturating_add(rolled)
-        {
-            rbitcoin_log::info!(
-                "sv2: SubmitSolution header_timestamp {} outside [{sent_ts}, +{rolled}s]",
-                m.header_timestamp
-            );
-            return Ok(());
-        }
         let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(m.coinbase_tx.as_ref())
         else {
             rbitcoin_log::info!("sv2: undecodable SubmitSolution coinbase");
@@ -323,6 +309,21 @@ impl Session {
                 header.block_hash()
             );
             return Ok(());
+        }
+        // Diagnostic only: a miner clock ahead of ours rolls past the wall
+        // time since SetNewPrevHash. accept_block enforces the consensus
+        // bounds (> MTP, < now + 2h), so the block is still submitted.
+        let (sent_ts, sent_at) = r.prev_sent;
+        let rolled =
+            u64::try_from(sent_at.elapsed().as_millis().div_ceil(1000)).unwrap_or(u64::MAX);
+        if u64::from(m.header_timestamp) < u64::from(sent_ts)
+            || u64::from(m.header_timestamp) > u64::from(sent_ts).saturating_add(rolled)
+        {
+            rbitcoin_log::info!(
+                "sv2: SubmitSolution template {} header_timestamp {} outside [{sent_ts}, +{rolled}s]; submitting",
+                m.template_id,
+                m.header_timestamp
+            );
         }
         let mut txdata = Vec::with_capacity(1 + r.t.txs.len());
         txdata.push(coinbase);

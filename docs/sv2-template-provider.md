@@ -130,9 +130,11 @@ three unused subprotocol crates) if it adds nothing.
   unknown-template solutions are logged and dropped; decodable ones that
   meet the target are always attempted through `ChainHub::accept_block` (the TP MUST try to
   broadcast work on its templates).
-- `SubmitSolution.header_timestamp` pre-check: ≥ the sent
-  `SetNewPrevHash.header_timestamp` and ≤ that plus wall-clock elapsed
-  (sv2-spec 07 §7.7).
+- `SubmitSolution.header_timestamp` window (sv2-spec 07 §7.7: ≥ the sent
+  `SetNewPrevHash.header_timestamp` and ≤ that plus wall-clock elapsed) is
+  logged, not enforced. A miner clock a few seconds fast still finds a
+  consensus-valid block, and `accept_block` applies the consensus bounds
+  (> MTP, < now + 2 h); dropping it would lose a real block.
 - `SubmitSolution` PoW pre-check: the session folds the coinbase txid over
   the retained template's `merkle_path` (coinbase is leaf 0, always the
   left child), builds the header, and drops the solution unless it meets
@@ -377,8 +379,8 @@ Ships the listener, bootstrap, tip push, transaction data, and
   coinbase_tx}` (full witness coinbase); the node assembles header (prev +
   recomputed merkle + message fields) + coinbase + retained txs and runs
   `ChainHub::accept_block`; the tip advances. Unknown/stale template or
-  undecodable coinbase → log and drop. Timestamp-window pre-check per
-  [Constraints](#constraints-all-plans).
+  undecodable coinbase → log and drop. An out-of-window timestamp is
+  logged and still submitted per [Constraints](#constraints-all-plans).
 - **Red:** journey: grind a regtest nonce on the served template, submit,
   assert the new tip hash; a garbage-coinbase submission leaves tip and
   session healthy.

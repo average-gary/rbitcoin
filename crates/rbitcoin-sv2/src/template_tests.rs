@@ -253,16 +253,19 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
     tp.shutdown().await;
 }
 
-/// A solution whose header misses the target is dropped before
-/// `accept_block`: it never claims the compact-block prefill slot. A
-/// solution that meets it still becomes the tip.
-#[tokio::test(flavor = "multi_thread")]
-async fn submit_solution_checks_pow_before_accept() {
-    use template_distribution_sv2::MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS;
+/// A connected session's first template, with a coinbase paying the whole
+/// value and an unground header over it.
+struct FirstTemplate {
+    tp: crate::Sv2TpHandle,
+    c: TpClient,
+    template_id: u64,
+    version: u32,
+    header: bitcoin::block::Header,
+    coinbase: Vec<u8>,
+}
 
-    let tc = padded_chain("sv2-pow-precheck", 0);
+async fn first_template(tc: &TestChain) -> FirstTemplate {
     tc.chain.clock.set_mock(i64::from(tc.tip_time));
-    tc.chain.set_prefill_compact(true);
     let tp = run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
         chain: Arc::clone(&tc.chain),
@@ -312,7 +315,7 @@ async fn submit_solution_checks_pow_before_accept() {
         .map(|h| h.as_ref().try_into().expect("32-byte hash"))
         .collect();
     let root = fold_coinbase_path(coinbase.compute_txid().to_byte_array(), &path);
-    let mut header = bitcoin::block::Header {
+    let header = bitcoin::block::Header {
         version: bitcoin::block::Version::from_consensus(t.version as i32),
         prev_blockhash: tip,
         merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
@@ -320,22 +323,43 @@ async fn submit_solution_checks_pow_before_accept() {
         bits: CompactTarget::from_consensus(p.n_bits),
         nonce: 0,
     };
-    let coinbase = serialize(&coinbase);
+    FirstTemplate {
+        tp,
+        c,
+        template_id: t.template_id,
+        version: t.version,
+        header,
+        coinbase: serialize(&coinbase),
+    }
+}
+
+/// A solution whose header misses the target is dropped before
+/// `accept_block`: it never claims the compact-block prefill slot. A
+/// solution that meets it still becomes the tip.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_checks_pow_before_accept() {
+    use template_distribution_sv2::MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS;
+
+    let tc = padded_chain("sv2-pow-precheck", 0);
+    tc.chain.set_prefill_compact(true);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+    let tip = header.prev_blockhash;
 
     while header.validate_pow(header.target()).is_ok() {
         header.nonce += 1;
     }
-    c.submit_solution(
-        t.template_id,
-        t.version,
-        header.time,
-        header.nonce,
-        &coinbase,
-    )
-    .await
-    .unwrap();
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
     // Frames are handled in order: this reply follows the submit.
-    c.request_transaction_data(t.template_id).await.unwrap();
+    c.request_transaction_data(template_id).await.unwrap();
     let f = recv_in_time(&mut c).await;
     assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
     assert_eq!(tc.chain.tip_header().unwrap().block_hash(), tip);
@@ -348,21 +372,46 @@ async fn submit_solution_checks_pow_before_accept() {
     while header.validate_pow(header.target()).is_err() {
         header.nonce += 1;
     }
-    c.submit_solution(
-        t.template_id,
-        t.version,
-        header.time,
-        header.nonce,
-        &coinbase,
-    )
-    .await
-    .unwrap();
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
     // The new tip's template follows the accept.
     let f = recv_in_time(&mut c).await;
     assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
     let solved = header.block_hash();
     assert_eq!(tc.chain.tip_header().unwrap().block_hash(), solved);
     assert_eq!(tc.chain.cmpct_prefill_indexes(&solved), Some(vec![0]));
+
+    tp.shutdown().await;
+}
+
+/// A miner whose clock runs a few seconds ahead of the TP rolls
+/// `header_timestamp` past the wall time since `SetNewPrevHash`. The block is
+/// still consensus-valid (above MTP, under now + 2h), so it becomes the tip.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_ahead_of_the_rolled_time_is_accepted() {
+    let tc = padded_chain("sv2-fast-clock", 0);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+    header.time += 5;
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
 
     tp.shutdown().await;
 }

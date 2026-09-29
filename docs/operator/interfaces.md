@@ -284,8 +284,10 @@ Noise handshake and `SetupConnection` and sent its first
 stay silent indefinitely. A client that stops reading is closed
 once a write to it makes no progress for 30 s.
 Each session keeps its last 3 templates. A request for an older template id
-answers `stale-template-id`, and an undecodable or out-of-window
-`SubmitSolution` is logged and dropped.
+answers `stale-template-id`, and an undecodable `SubmitSolution` or one
+that misses the template target is logged and dropped. A `header_timestamp`
+outside the sv2 rolling window (a miner clock running ahead) is logged and
+still submitted; block validation applies the consensus time rules.
 
 ```bash
 openssl rand -hex 32 > ./datadir-regtest/sv2-authority.key
