@@ -1469,9 +1469,8 @@ fn is_conf_true(val: &str) -> bool {
     )
 }
 
-/// Parse `1`/`true`/`yes`/`on` → true; `0`/`false`/`no`/`off` → false.
-/// The error never echoes `val`: it is a secret.
 /// 64 hex, or SRI `key-utils` `Secp256k1SecretKey` base58check (the raw 32 bytes).
+/// The error never echoes `val`: it is a secret.
 fn parse_authority_sec(key: &str, val: &str) -> Result<Sv2AuthoritySecret, NodeError> {
     <[u8; 32]>::from_hex(val)
         .ok()
@@ -1485,6 +1484,7 @@ fn parse_authority_sec(key: &str, val: &str) -> Result<Sv2AuthoritySecret, NodeE
         })
 }
 
+/// Parse `1`/`true`/`yes`/`on` → true; `0`/`false`/`no`/`off` → false.
 fn parse_conf_bool(val: &str) -> Result<bool, String> {
     let v = val.to_ascii_lowercase();
     match v.as_str() {
