@@ -2925,7 +2925,8 @@ async fn sv2_tp_bootstrap() {
     );
     let sent = jsonrpc(rpc_addr, "sendrawtransaction", json!([encode_tx(&tx)])).await;
     assert_eq!(sent["result"], tx.compute_txid().to_string(), "{sent}");
-    c.coinbase_output_constraints(0, 0).await.unwrap();
+    // An identical resend does not rebuild; a changed budget does.
+    c.coinbase_output_constraints(0, 1).await.unwrap();
     let t2 = sv2_template(sv2_recv(&mut c).await);
     assert!(!t2.future_template, "same prev hash: no new SetNewPrevHash");
     assert!(t2.template_id > t.template_id);
@@ -2949,8 +2950,8 @@ async fn sv2_tp_bootstrap() {
     );
     // Three templates retained per session: the oldest is now stale.
     let mut last = t2.template_id;
-    for _ in 0..2 {
-        c.coinbase_output_constraints(0, 0).await.unwrap();
+    for sigops in 2..4 {
+        c.coinbase_output_constraints(0, sigops).await.unwrap();
         last = sv2_template(sv2_recv(&mut c).await).template_id;
     }
     c.request_transaction_data(t.template_id).await.unwrap();

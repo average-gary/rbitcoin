@@ -283,6 +283,9 @@ Noise handshake and `SetupConnection` and sent its first
 `CoinbaseOutputConstraints` within 10 s is closed; after that a client may
 stay silent indefinitely. A client that stops reading is closed
 once a write to it makes no progress for 30 s.
+A changed `CoinbaseOutputConstraints` within 1 s of the last template waits
+out the rest of that second; a client that keeps replacing a queued budget
+(more than 8 times before it is built) is closed.
 Each session keeps its last 3 templates. A request for an older template id
 answers `stale-template-id`, and an undecodable `SubmitSolution` or one
 that misses the template target is logged and dropped. A `header_timestamp`

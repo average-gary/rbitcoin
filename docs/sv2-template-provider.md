@@ -247,8 +247,18 @@ Ships the listener, bootstrap, tip push, transaction data, and
 
 - **Contract:** after setup, `CoinbaseOutputConstraints` makes the session
   build in a blocking region and send `NewTemplate{future_template: true}`
-  with a strictly increasing `template_id`; a re-sent constraints message
-  rebuilds with the new budget. The build calls
+  with a strictly increasing `template_id`; a changed constraints message
+  rebuilds with the new budget. A resend identical to the last budget,
+  once a template on the current prev hash was sent, is a no-op: it
+  does not take the mempool lock or send a template (tip events still
+  rebuild; mempool gains on an unchanged tip are Plan C). A changed
+  budget within 1 s of the session's last template is deferred to the end
+  of that second and built once on the latest budget, so a client cycling
+  budgets gets at most one constraints-triggered build per second. More
+  than 8 budgets that each replace a still-queued one before it is built
+  close the session: a real client changes its budget minutes apart, and
+  the slot goes back to one. A client pacing one budget per cooldown is
+  only made to wait. The build calls
   `MempoolHub::select_block_template` with the per-session budget
   ([Constraints](#constraints-all-plans)); `coinbase_prefix` is the BIP34
   height push; `value_remaining` = subsidy + Σ selected fees (from the
@@ -274,7 +284,7 @@ Ships the listener, bootstrap, tip push, transaction data, and
   `NewTemplate{future_template: true}` followed by `SetNewPrevHash` with
   the same `template_id`, the tip as `prev_hash`, `header_timestamp` ≥
   MTP + 1, and the next nBits with its target. A later template on the
-  same prev hash (re-sent constraints) is `future_template: false` with no
+  same prev hash (changed constraints) is `future_template: false` with no
   `SetNewPrevHash`. While `ChainHub::in_ibd()` (relay-inhibited: stale tip
   or below min chain work), the session holds the constraints and builds
   when a tip event clears it. `getblocktemplate` has no sync gate in this

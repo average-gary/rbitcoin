@@ -41,6 +41,17 @@ const TDP_VERSION: u16 = 2;
 /// `SubmitSolution` do not depend on the mempool still holding them.
 const MAX_RETAINED: usize = 3;
 
+/// CPU trade: a `CoinbaseOutputConstraints` within this long of the last
+/// build waits out the rest of it, so a client cycling budgets costs at most
+/// one mempool-locked build per interval; a changed budget can lag by up to
+/// this long. Tip events are not delayed.
+const CONSTRAINTS_COOLDOWN: Duration = Duration::from_secs(1);
+
+/// Budgets that replace a still-queued one before it is built. A real client
+/// changes its budget minutes apart; past this many inside one cooldown the
+/// session is closed so the slot goes back to a real client.
+const MAX_SUPERSEDED_CONSTRAINTS: u32 = 8;
+
 /// The templates one session was sent. Ids are strictly increasing.
 #[derive(Default)]
 struct Templates {
@@ -143,6 +154,9 @@ pub(crate) async fn serve(
         stale_grace,
         constraints: None,
         templates: Templates::default(),
+        built_at: None,
+        rebuild_at: None,
+        superseded: 0,
         held_logged: false,
     };
     s.run(&mut frames, deadline).await
@@ -159,6 +173,12 @@ struct Session {
     /// Last `CoinbaseOutputConstraints`: `(max_additional_size, sigops)`.
     constraints: Option<(u32, u16)>,
     templates: Templates,
+    /// When `publish` last sent a template.
+    built_at: Option<Instant>,
+    /// Constraints-triggered rebuild deferred by `CONSTRAINTS_COOLDOWN`.
+    rebuild_at: Option<Instant>,
+    /// Budgets that replaced a queued rebuild's since the last build.
+    superseded: u32,
     held_logged: bool,
 }
 
@@ -191,6 +211,11 @@ impl Session {
                 {
                     self.templates.retire(Instant::now());
                 }
+                _ = tokio::time::sleep_until(self.rebuild_at.unwrap_or_else(Instant::now)),
+                    if self.rebuild_at.is_some() =>
+                {
+                    self.publish().await?;
+                }
                 _ = tokio::time::sleep_until(setup_deadline), if self.constraints.is_none() => {
                     return Err(missed_setup_deadline());
                 }
@@ -207,11 +232,31 @@ impl Session {
                     rbitcoin_log::info!("sv2: undecodable CoinbaseOutputConstraints");
                     return Ok(false);
                 };
-                self.constraints = Some((
+                let c = Some((
                     c.coinbase_output_max_additional_size,
                     c.coinbase_output_max_additional_sigops,
                 ));
-                self.publish().await?;
+                // A resend of the budget already built on (or queued) skips
+                // the mempool read lock; tip events rebuild when the prev
+                // hash moves.
+                if c == self.constraints && self.templates.current_prev.is_some() {
+                    return Ok(true);
+                }
+                self.constraints = c;
+                match self.built_at.map(|t| t + CONSTRAINTS_COOLDOWN) {
+                    Some(at) if at > Instant::now() => {
+                        if self.rebuild_at.replace(at).is_some() {
+                            self.superseded += 1;
+                            if self.superseded > MAX_SUPERSEDED_CONSTRAINTS {
+                                rbitcoin_log::info!(
+                                    "sv2: CoinbaseOutputConstraints flood, closing"
+                                );
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    _ => self.publish().await?,
+                }
             }
             MESSAGE_TYPE_REQUEST_TRANSACTION_DATA => {
                 on_request_transaction_data(&mut self.conn, frame, &self.templates).await?;
@@ -225,6 +270,8 @@ impl Session {
     /// Build on the current tip and send it. No template while in IBD:
     /// leaving IBD always comes with a new tip, which calls this again.
     async fn publish(&mut self) -> io::Result<()> {
+        self.rebuild_at = None;
+        self.superseded = 0;
         let Some((size, sigops)) = self.constraints else {
             return Ok(());
         };
@@ -252,6 +299,7 @@ impl Session {
             .to_message(template_id, new_prev)
             .map_err(|e| io::Error::other(format!("sv2 NewTemplate: {e:?}")))?;
         self.conn.send(MESSAGE_TYPE_NEW_TEMPLATE, msg).await?;
+        self.built_at = Some(Instant::now());
         self.templates.built_since_tip = true;
         if new_prev {
             self.conn

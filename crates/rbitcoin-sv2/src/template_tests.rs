@@ -212,6 +212,89 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn template_resent_constraints_do_not_rebuild() {
+    let tc = padded_chain("sv2-template-resent", 1);
+    tc.chain.clock.set_mock(i64::from(tc.tip_time));
+    // 16_000 sigop cost: excluded under a u16::MAX client reserve.
+    let heavy = spend(
+        tc.coinbases[0],
+        20_000,
+        ScriptBuf::from_bytes(vec![OP_CHECKSIG; 4_000]),
+    );
+    tc.mempool.accept_tx(&heavy).expect("mempool accept");
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+
+    c.coinbase_output_constraints(0, u16::MAX).await.unwrap();
+    let first = expect_template(&mut c, &tc, &[], true).await;
+    // Frames are handled in order: had the resend rebuilt, its heavy-less
+    // template would be the next frame.
+    c.coinbase_output_constraints(0, u16::MAX).await.unwrap();
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let id = expect_template(&mut c, &tc, &[&heavy], false).await;
+    assert!(id > first, "template_id must increase");
+
+    tp.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn template_constraint_rebuilds_are_rate_limited() {
+    let tc = padded_chain("sv2-template-rate", 1);
+    tc.chain.clock.set_mock(i64::from(tc.tip_time));
+    // 16_000 sigop cost: excluded under a u16::MAX client reserve.
+    let heavy = spend(
+        tc.coinbases[0],
+        20_000,
+        ScriptBuf::from_bytes(vec![OP_CHECKSIG; 4_000]),
+    );
+    tc.mempool.accept_tx(&heavy).expect("mempool accept");
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+
+    c.coinbase_output_constraints(0, u16::MAX).await.unwrap();
+    let first = expect_template(&mut c, &tc, &[], true).await;
+    // Alternating budgets: one deferred rebuild on the last budget, not one
+    // template per message.
+    for sigops in [0, u16::MAX, 0] {
+        c.coinbase_output_constraints(0, sigops).await.unwrap();
+    }
+    let id = expect_template(&mut c, &tc, &[&heavy], false).await;
+    assert!(id > first, "template_id must increase");
+    let extra = tokio::time::timeout(Duration::from_millis(500), c.recv()).await;
+    assert!(extra.is_err(), "one rebuild per cooldown");
+
+    tp.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn sync_gate_holds_constraints_until_a_fresh_tip() {
     let tc = padded_chain("sv2-gate", 0);
     let tp = run_sv2_tp(Sv2TpConfig {
@@ -412,6 +495,50 @@ async fn submit_solution_ahead_of_the_rolled_time_is_accepted() {
         tc.chain.tip_header().unwrap().block_hash(),
         header.block_hash()
     );
+
+    tp.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn constraints_flood_closes_the_session() {
+    let tc = padded_chain("sv2-template-flood", 0);
+    tc.chain.clock.set_mock(i64::from(tc.tip_time));
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    expect_template(&mut c, &tc, &[], true).await;
+
+    // Well past the flood limit, all inside one cooldown: each budget
+    // replaces the queued one before it is ever built.
+    for i in 0..64u16 {
+        if c.coinbase_output_constraints(0, i % 2).await.is_err() {
+            break;
+        }
+    }
+    let end = tokio::time::timeout(Duration::from_secs(5), c.recv())
+        .await
+        .expect("closed before the deferred rebuild");
+    assert!(end.is_err(), "flood must close the session, got a frame");
+
+    let mut fresh = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("the slot is free again");
+    fresh.setup_connection(2, 2, 2, 0).await.unwrap();
+    fresh.recv().await.expect("setup reply");
 
     tp.shutdown().await;
 }
