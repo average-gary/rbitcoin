@@ -110,10 +110,11 @@ pub(crate) async fn serve(
     chain: Arc<ChainHub>,
     stale_grace: Duration,
     setup_timeout: Duration,
+    write_timeout: Duration,
 ) -> io::Result<()> {
     let deadline = Instant::now() + setup_timeout;
     let setup = async {
-        let mut conn = NoiseConn::accept(stream, responder).await?;
+        let mut conn = NoiseConn::accept(stream, responder, write_timeout).await?;
         let frame = conn.recv().await?;
         Ok::<_, io::Error>(on_setup(&mut conn, frame).await?.then_some(conn))
     };

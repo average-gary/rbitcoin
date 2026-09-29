@@ -281,7 +281,8 @@ client. No templates are sent while the node is in IBD.
 At most 8 sessions run at once. A connection that has not finished the
 Noise handshake and `SetupConnection` and sent its first
 `CoinbaseOutputConstraints` within 10 s is closed; after that a client may
-stay silent indefinitely.
+stay silent indefinitely. A client that stops reading is closed
+once a write to it makes no progress for 30 s.
 Each session keeps its last 3 templates. A request for an older template id
 answers `stale-template-id`, and an undecodable or out-of-window
 `SubmitSolution` is logged and dropped.

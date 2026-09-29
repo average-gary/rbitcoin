@@ -95,6 +95,10 @@ three unused subprotocol crates) if it adds nothing.
   are handled but do not extend the deadline. There is no read deadline
   after that: TDP has no keepalive and a client may stay silent while the
   TP pushes.
+- Write deadline: a socket write that makes no progress for 30 s
+  (`WRITE_TIMEOUT`) closes the session, so a client that stops reading
+  cannot stall it. The deadline is per write call, not per frame, so a
+  slow reader still receives a multi-MB `RequestTransactionData.Success`.
 - Per-session budget: weight `MAX_BLOCK_WEIGHT − max(1168 +
   4·coinbase_output_max_additional_size, 2000)` WU (sv2-spec 07 §7.1);
   sigops start at `coinbase_output_max_additional_sigops` (Core

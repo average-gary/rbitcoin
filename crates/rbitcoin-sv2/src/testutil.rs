@@ -23,7 +23,7 @@ impl TpClient {
         let initiator = noise_sv2::Initiator::from_raw_k(authority_pubkey)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{e:?}")))?;
         Ok(Self {
-            conn: NoiseConn::connect(stream, initiator).await?,
+            conn: NoiseConn::connect(stream, initiator, crate::WRITE_TIMEOUT).await?,
         })
     }
 

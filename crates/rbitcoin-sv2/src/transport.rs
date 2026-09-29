@@ -7,6 +7,7 @@ use codec_sv2::{
 };
 use noise_sv2::{Initiator, Responder};
 use std::io;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -36,6 +37,8 @@ pub(crate) struct NoiseWriter {
     stream: OwnedWriteHalf,
     encoder: NoiseEncoder,
     tx: TransportEncryptState,
+    /// Longest one socket write may make no progress.
+    write_timeout: Duration,
 }
 
 fn codec_err(e: codec_sv2::Error) -> io::Error {
@@ -46,6 +49,7 @@ impl NoiseConn {
     pub(crate) async fn accept(
         mut stream: TcpStream,
         responder: Box<Responder>,
+        write_timeout: Duration,
     ) -> io::Result<Self> {
         let mut decoder = NoiseDecoder::new();
         let mut encoder = NoiseEncoder::new();
@@ -69,12 +73,13 @@ impl NoiseConn {
             .write_all(encoder.encode_handshake(reply).as_ref())
             .await?;
         let (tx, rx) = transport.split();
-        Ok(Self::new(stream, encoder, decoder, tx, rx))
+        Ok(Self::new(stream, encoder, decoder, tx, rx, write_timeout))
     }
 
     pub(crate) async fn connect(
         mut stream: TcpStream,
         initiator: Box<Initiator>,
+        write_timeout: Duration,
     ) -> io::Result<Self> {
         let mut decoder = NoiseDecoder::new();
         let mut encoder = NoiseEncoder::new();
@@ -98,7 +103,7 @@ impl NoiseConn {
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "sv2: handshake size"))?;
         let (tx, rx) = sent.step_2(reply).map_err(codec_err)?.split();
-        Ok(Self::new(stream, encoder, decoder, tx, rx))
+        Ok(Self::new(stream, encoder, decoder, tx, rx, write_timeout))
     }
 
     fn new(
@@ -107,6 +112,7 @@ impl NoiseConn {
         decoder: NoiseDecoder,
         tx: TransportEncryptState,
         rx: TransportDecryptState,
+        write_timeout: Duration,
     ) -> Self {
         let (read, write) = stream.into_split();
         Self {
@@ -119,6 +125,7 @@ impl NoiseConn {
                 stream: write,
                 encoder,
                 tx,
+                write_timeout,
             },
         }
     }
@@ -153,7 +160,20 @@ impl NoiseWriter {
             .encoder
             .encode_transport(frame, &mut self.tx)
             .map_err(codec_err)?;
-        self.stream.write_all(bytes.as_ref()).await
+        // Deadline per write call, not per frame: a slow reader still gets
+        // a multi-MB RequestTransactionData.Success, one that stops does not
+        // hold the session.
+        let mut buf: &[u8] = bytes.as_ref();
+        while !buf.is_empty() {
+            let n = tokio::time::timeout(self.write_timeout, self.stream.write(buf))
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "sv2: write stalled"))??;
+            if n == 0 {
+                return Err(io::ErrorKind::WriteZero.into());
+            }
+            buf = &buf[n..];
+        }
+        Ok(())
     }
 }
 

@@ -29,6 +29,9 @@ pub const MAX_SESSIONS: usize = 8;
 /// accept, so without it [`MAX_SESSIONS`] silent sockets lock clients out.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Default [`Sv2TpConfig::write_timeout`].
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct Sv2TpConfig {
     pub listen: SocketAddr,
     /// Tip, params, and the attached mempool the templates are built from.
@@ -44,6 +47,9 @@ pub struct Sv2TpConfig {
     /// which the session never writes). No read deadline after that: TDP has
     /// no keepalive and a client may stay silent while the TP pushes.
     pub setup_timeout: Duration,
+    /// A socket write that makes no progress this long closes the session,
+    /// so a client that stops reading cannot hold a slot.
+    pub write_timeout: Duration,
 }
 
 pub struct Sv2TpHandle {
@@ -90,6 +96,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let cert_validity = config.cert_validity;
     let stale_grace = config.stale_grace;
     let setup_timeout = config.setup_timeout;
+    let write_timeout = config.write_timeout;
     let chain = config.chain;
     let listener = TcpListener::bind(config.listen).await?;
     let local_addr = listener.local_addr()?;
@@ -127,7 +134,16 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             let chain = Arc::clone(&chain);
             let h = tokio::spawn(async move {
                 let _slot = slot;
-                match session::serve(stream, responder, chain, stale_grace, setup_timeout).await {
+                match session::serve(
+                    stream,
+                    responder,
+                    chain,
+                    stale_grace,
+                    setup_timeout,
+                    write_timeout,
+                )
+                .await
+                {
                     Ok(()) => rbitcoin_log::info!("sv2: disconnect {peer}"),
                     Err(e) => rbitcoin_log::info!("sv2: disconnect {peer} ({e})"),
                 }

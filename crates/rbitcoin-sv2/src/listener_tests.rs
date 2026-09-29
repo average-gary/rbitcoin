@@ -1,6 +1,6 @@
 use crate::test_chain::padded_chain;
 use crate::testutil::TpClient;
-use crate::{run_sv2_tp, Sv2TpConfig, MAX_SESSIONS, SETUP_TIMEOUT};
+use crate::{run_sv2_tp, Sv2TpConfig, MAX_SESSIONS, SETUP_TIMEOUT, WRITE_TIMEOUT};
 use common_messages_sv2::{
     SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
     MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
@@ -45,6 +45,7 @@ async fn setup_connection_success_errors_and_session_cap() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -104,6 +105,7 @@ async fn authority_key_prints_in_key_utils_base58check() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -137,6 +139,7 @@ async fn silent_sockets_are_dropped_at_the_setup_deadline() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout,
+        write_timeout: WRITE_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -176,6 +179,7 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
         setup_timeout,
+        write_timeout: WRITE_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -213,5 +217,52 @@ async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
             break;
         }
     }
+    tp.shutdown().await;
+}
+
+/// A client that floods requests and never reads jams the TP's writes; the
+/// write deadline must close the session instead of stalling it forever.
+#[tokio::test]
+async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
+    let tc = padded_chain("sv2-write-deadline", 0);
+    let write_timeout = Duration::from_millis(200);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: std::sync::Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        write_timeout,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(TDP, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+
+    // Each unknown id answers RequestTransactionData.Error, which the
+    // client never reads: the TP blocks on write, then stops reading.
+    let mut jammed = false;
+    for id in 1..=1_000_000u64 {
+        let sent = tokio::time::timeout(write_timeout, c.request_transaction_data(id)).await;
+        if sent.is_err() {
+            jammed = true;
+            break;
+        }
+    }
+    assert!(jammed, "socket buffers never filled");
+    tokio::time::sleep(write_timeout * 3).await;
+
+    let drained = tokio::time::timeout(Duration::from_secs(10), async {
+        while c.recv().await.is_ok() {}
+    })
+    .await;
+    assert!(
+        drained.is_ok(),
+        "session must close once its write stalls past the deadline"
+    );
     tp.shutdown().await;
 }

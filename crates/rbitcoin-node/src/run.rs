@@ -1753,6 +1753,7 @@ async fn start_sv2_tp(config: &NodeConfig, hub: &Arc<ChainHub>) -> Option<Sv2TpH
         cert_validity: Duration::from_secs(config.sv2_tp_cert_validity_secs),
         stale_grace: Duration::from_secs(config.sv2_tp_stale_grace_secs),
         setup_timeout: rbitcoin_sv2::SETUP_TIMEOUT,
+        write_timeout: rbitcoin_sv2::WRITE_TIMEOUT,
     };
     match run_sv2_tp(cfg).await {
         Ok(h) => {
