@@ -4,7 +4,7 @@ use crate::template;
 use crate::transport::{Frame, NoiseConn, NoiseWriter};
 use binary_sv2::{Seq064K, Str0255, B016M, B064K};
 use bitcoin::hashes::Hash;
-use bitcoin::{block, Block, BlockHash, CompactTarget, Transaction, TxMerkleNode};
+use bitcoin::{block, Block, BlockHash, CompactTarget, Transaction, TxMerkleNode, Witness};
 use common_messages_sv2::{
     Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
     ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
@@ -329,11 +329,23 @@ impl Session {
             rbitcoin_log::info!("sv2: SubmitSolution for unknown template {}", m.template_id);
             return Ok(());
         };
-        let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(m.coinbase_tx.as_ref())
+        let Ok(mut coinbase) =
+            bitcoin::consensus::deserialize::<Transaction>(m.coinbase_tx.as_ref())
         else {
             rbitcoin_log::info!("sv2: undecodable SubmitSolution coinbase");
             return Ok(());
         };
+        // BIP141: a committed block's coinbase witness is exactly the reserved
+        // value. A client may omit it; the commitment used ours, so fill it.
+        // Without a commitment output a coinbase witness is invalid, so a bare
+        // coinbase stays bare. The txid (and the merkle root) does not cover
+        // the witness.
+        let committed = rbitcoin_consensus::witness_commitment_vout_index(&coinbase).is_some();
+        if let Some(input) = coinbase.input.first_mut() {
+            if committed && input.witness.is_empty() {
+                input.witness = Witness::from_slice(&[template::WITNESS_RESERVED_VALUE]);
+            }
+        }
         // CPU trade: the coinbase is leaf 0 (always the left child), so its
         // txid folded over the template's path is the root the full txid
         // list would give. A miss on the target costs one fold, not a clone

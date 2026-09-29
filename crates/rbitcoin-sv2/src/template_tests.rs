@@ -468,6 +468,85 @@ async fn submit_solution_checks_pow_before_accept() {
     tp.shutdown().await;
 }
 
+/// A client that leaves the coinbase witness empty still solves the block:
+/// the TP fills the zero reserved value the witness commitment was built
+/// with. The txid, and so the merkle root, does not cover the witness.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_without_coinbase_witness_is_accepted() {
+    let tc = padded_chain("sv2-no-cb-witness", 0);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+    let mut bare: Transaction = bitcoin::consensus::deserialize(&coinbase).unwrap();
+    bare.input[0].witness = Witness::new();
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        template_id,
+        version,
+        header.time,
+        header.nonce,
+        &serialize(&bare),
+    )
+    .await
+    .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
+/// A witness-less block may drop the commitment output. Its coinbase then
+/// stays bare: a filled witness without a commitment is not valid (BIP141).
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_without_witness_commitment_is_accepted() {
+    let tc = padded_chain("sv2-no-commitment", 0);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+    let mut bare: Transaction = bitcoin::consensus::deserialize(&coinbase).unwrap();
+    bare.input[0].witness = Witness::new();
+    bare.output.truncate(1);
+    // Empty mempool: the merkle path is empty and the root is the coinbase txid.
+    header.merkle_root =
+        bitcoin::TxMerkleNode::from_byte_array(bare.compute_txid().to_byte_array());
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        template_id,
+        version,
+        header.time,
+        header.nonce,
+        &serialize(&bare),
+    )
+    .await
+    .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
+
+    tp.shutdown().await;
+}
+
 /// A miner whose clock runs a few seconds ahead of the TP rolls
 /// `header_timestamp` past the wall time since `SetNewPrevHash`. The block is
 /// still consensus-valid (above MTP, under now + 2h), so it becomes the tip.

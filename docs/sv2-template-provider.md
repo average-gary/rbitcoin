@@ -122,7 +122,11 @@ three unused subprotocol crates) if it adds nothing.
   subsidy + Σ fees; `coinbase_tx_outputs` is the raw concatenation (no
   CompactSize prefix) with the witness-commitment OP_RETURN **last**, from
   `rbitcoin_consensus::witness_commitment_script` (already the one owner,
-  used by GBT) with a 32-byte zero reserved value.
+  used by GBT) with a 32-byte zero reserved value. A `SubmitSolution`
+  coinbase with an empty input witness and a witness-commitment output
+  gets that reserved value filled in before assembly (the txid, and so
+  the merkle root, does not cover it); a coinbase without a commitment
+  or with a non-empty witness is submitted as sent.
 - `SetNewPrevHash.target` == nBits target here (no weak blocks).
 - No templates before sync: same refusal gate as `getblocktemplate` during
   IBD.

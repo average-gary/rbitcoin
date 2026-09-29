@@ -14,6 +14,10 @@ use rbitcoin_primitives::Height;
 use std::io;
 use template_distribution_sv2::{NewTemplate, SetNewPrevHash};
 
+/// Coinbase witness reserved value the template's witness commitment is
+/// built with (BIP141).
+pub(crate) const WITNESS_RESERVED_VALUE: [u8; 32] = [0u8; 32];
+
 /// sv2-spec 07 §7.1: coinbase weight outside the client's additional outputs,
 /// and the floor on the whole reserve.
 const COINBASE_BASE_WU: u64 = 1168;
@@ -114,7 +118,7 @@ pub(crate) fn build(
             selected
                 .iter()
                 .map(|(tx, _)| tx.compute_wtxid().to_byte_array()),
-            &[0u8; 32],
+            &WITNESS_RESERVED_VALUE,
         )),
     };
     let mut leaves = vec![[0u8; 32]];
