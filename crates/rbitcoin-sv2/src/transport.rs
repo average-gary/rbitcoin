@@ -3,9 +3,9 @@
 use binary_sv2::{GetSize, Serialize};
 use codec_sv2::{
     Decoded, Decrypted, Handshake, MessageFrame, NoiseDecoder, NoiseEncoder, TransportDecryptState,
-    TransportEncryptState,
+    TransportEncryptState, ENCRYPTED_SV2_FRAME_HEADER_SIZE, SV2_FRAME_PLAINTEXT_CHUNK_SIZE,
 };
-use noise_sv2::{Initiator, Responder};
+use noise_sv2::{Initiator, Responder, AEAD_MAC_LEN};
 use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,6 +16,19 @@ use tokio::net::TcpStream;
 pub struct Frame {
     pub msg_type: u8,
     pub payload: Vec<u8>,
+}
+
+/// Largest client→TP payload. The largest TDP client message is
+/// `SubmitSolution`: 20 fixed bytes plus a `B064K` coinbase (2-byte length,
+/// ≤ 65535 bytes). The 24-bit frame length would otherwise let a client
+/// make the session buffer ~16 MB per frame.
+pub(crate) const MAX_CLIENT_PAYLOAD: usize = 20 + 2 + u16::MAX as usize;
+
+/// Encrypted bytes on the wire for a frame carrying `payload` bytes.
+const fn encrypted_frame_len(payload: usize) -> usize {
+    ENCRYPTED_SV2_FRAME_HEADER_SIZE
+        + payload
+        + payload.div_ceil(SV2_FRAME_PLAINTEXT_CHUNK_SIZE) * AEAD_MAC_LEN
 }
 
 pub(crate) struct NoiseConn {
@@ -31,6 +44,10 @@ pub(crate) struct NoiseReader {
     // `next_transport_frame` consumes the state; a failed round leaves `None`
     // and the connection must close (codec_sv2 nonce rule).
     rx: Option<TransportDecryptState>,
+    /// Encrypted bytes one frame may take; see [`MAX_CLIENT_PAYLOAD`].
+    max_frame: usize,
+    /// Encrypted bytes read so far for the frame being decoded.
+    frame_read: usize,
 }
 
 pub(crate) struct NoiseWriter {
@@ -73,7 +90,16 @@ impl NoiseConn {
             .write_all(encoder.encode_handshake(reply).as_ref())
             .await?;
         let (tx, rx) = transport.split();
-        Ok(Self::new(stream, encoder, decoder, tx, rx, write_timeout))
+        let max_frame = encrypted_frame_len(MAX_CLIENT_PAYLOAD);
+        Ok(Self::new(
+            stream,
+            encoder,
+            decoder,
+            tx,
+            rx,
+            write_timeout,
+            max_frame,
+        ))
     }
 
     pub(crate) async fn connect(
@@ -103,7 +129,16 @@ impl NoiseConn {
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "sv2: handshake size"))?;
         let (tx, rx) = sent.step_2(reply).map_err(codec_err)?.split();
-        Ok(Self::new(stream, encoder, decoder, tx, rx, write_timeout))
+        // TP→client frames are bounded by the 24-bit frame length only.
+        Ok(Self::new(
+            stream,
+            encoder,
+            decoder,
+            tx,
+            rx,
+            write_timeout,
+            usize::MAX,
+        ))
     }
 
     fn new(
@@ -113,6 +148,7 @@ impl NoiseConn {
         tx: TransportEncryptState,
         rx: TransportDecryptState,
         write_timeout: Duration,
+        max_frame: usize,
     ) -> Self {
         let (read, write) = stream.into_split();
         Self {
@@ -120,6 +156,8 @@ impl NoiseConn {
                 stream: read,
                 decoder,
                 rx: Some(rx),
+                max_frame,
+                frame_read: 0,
             },
             writer: NoiseWriter {
                 stream: write,
@@ -191,13 +229,26 @@ impl NoiseReader {
             {
                 Decrypted::Frame(mut frame, state) => {
                     self.rx = Some(state);
+                    self.frame_read = 0;
                     return Ok(Frame {
                         msg_type: frame.header().msg_type(),
                         payload: frame.payload().to_vec(),
                     });
                 }
-                Decrypted::Incomplete(_, state) => {
+                Decrypted::Incomplete(n, state) => {
                     self.rx = Some(state);
+                    // codec_sv2 keeps the decrypted header private and asks
+                    // for at most one chunk per read, so the declared length
+                    // is not visible. Reads never cross a frame boundary, so
+                    // the running count closes an oversized frame before the
+                    // chunk that would exceed the cap is read.
+                    self.frame_read += n;
+                    if self.frame_read > self.max_frame {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "sv2: frame over the size cap",
+                        ));
+                    }
                     self.stream.read_exact(self.decoder.writable()).await?;
                 }
             }

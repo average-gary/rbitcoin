@@ -266,3 +266,45 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
     );
     tp.shutdown().await;
 }
+
+/// The largest legitimate client frame (a `SubmitSolution` with a full
+/// `B064K` coinbase) keeps the session; a larger frame closes it.
+#[tokio::test]
+async fn oversized_client_frame_closes_the_session() {
+    let tc = padded_chain("sv2-frame-cap", 0);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: std::sync::Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(TDP, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+
+    let coinbase = vec![0u8; usize::from(u16::MAX)];
+    c.submit_solution(1, 0, 0, 0, &coinbase).await.unwrap();
+    c.request_transaction_data(1).await.unwrap();
+    let f = c
+        .recv()
+        .await
+        .expect("open after a max-size SubmitSolution");
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+
+    let _ = c.send_bytes(0xff, &vec![0u8; 1 << 20]).await;
+    c.request_transaction_data(1).await.ok();
+    let closed = tokio::time::timeout(Duration::from_secs(5), c.recv()).await;
+    assert!(
+        matches!(closed, Ok(Err(_))),
+        "an oversized frame must close the session, got {:?}",
+        closed.map(|r| r.map(|f| f.msg_type))
+    );
+    tp.shutdown().await;
+}

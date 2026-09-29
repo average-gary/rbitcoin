@@ -1,7 +1,7 @@
 //! Test-only TDP client: a Noise initiator pinned to the TP's authority key.
 
 use crate::transport::{Frame, NoiseConn};
-use binary_sv2::{Str0255, B064K};
+use binary_sv2::{Str0255, B016M, B064K};
 use common_messages_sv2::{Protocol, SetupConnection, MESSAGE_TYPE_SETUP_CONNECTION};
 use std::io;
 use std::net::SocketAddr;
@@ -92,6 +92,13 @@ impl TpClient {
             coinbase_tx,
         };
         self.conn.send(MESSAGE_TYPE_SUBMIT_SOLUTION, msg).await
+    }
+
+    /// Send `payload` as one `B016M` field under an arbitrary message type.
+    pub async fn send_bytes(&mut self, msg_type: u8, payload: &[u8]) -> io::Result<()> {
+        let msg = B016M::try_from(payload)
+            .map_err(|e| io::Error::other(format!("sv2 payload: {e:?}")))?;
+        self.conn.send(msg_type, msg).await
     }
 
     pub async fn recv(&mut self) -> io::Result<Frame> {

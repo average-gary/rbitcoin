@@ -99,6 +99,13 @@ three unused subprotocol crates) if it adds nothing.
   (`WRITE_TIMEOUT`) closes the session, so a client that stops reading
   cannot stall it. The deadline is per write call, not per frame, so a
   slow reader still receives a multi-MB `RequestTransactionData.Success`.
+- Client frame cap: a client→TP payload over `MAX_CLIENT_PAYLOAD`
+  (65557 bytes: `SubmitSolution`'s 20 fixed bytes plus a full `B064K`
+  coinbase, the largest TDP client message) closes the session. codec_sv2
+  keeps the decrypted header length private and reads a frame one chunk at
+  a time, so the reader counts encrypted bytes per frame and closes before
+  reading the chunk that would pass the cap. A session buffers at most
+  ~64 KiB of client frame instead of the ~16 MB the 24-bit length allows.
 - Per-session budget: weight `MAX_BLOCK_WEIGHT − max(1168 +
   4·coinbase_output_max_additional_size, 2000)` WU (sv2-spec 07 §7.1);
   sigops start at `coinbase_output_max_additional_sigops` (Core
