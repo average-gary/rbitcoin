@@ -4,10 +4,12 @@
 //! `docs/sv2-template-provider.md`.
 
 mod session;
+mod template;
 pub mod testutil;
 mod transport;
 
 use bitcoin::secp256k1::{Keypair, Secp256k1};
+use rbitcoin_net::ChainHub;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -25,6 +27,8 @@ pub const MAX_SESSIONS: usize = 8;
 
 pub struct Sv2TpConfig {
     pub listen: SocketAddr,
+    /// Tip, params, and the attached mempool the templates are built from.
+    pub chain: Arc<ChainHub>,
     /// Authority secret key; clients pin its x-only public key.
     pub authority_secret: [u8; 32],
     /// Validity of the per-connection Noise certificate signed by the authority.
@@ -64,6 +68,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let authority_pubkey = keypair.x_only_public_key().0.serialize();
     let authority_secret = config.authority_secret;
     let cert_validity = config.cert_validity;
+    let chain = config.chain;
     let listener = TcpListener::bind(config.listen).await?;
     let local_addr = listener.local_addr()?;
     let slots = Arc::new(Semaphore::new(MAX_SESSIONS));
@@ -97,9 +102,10 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
                 }
             };
             rbitcoin_log::info!("sv2: connect {peer}");
+            let chain = Arc::clone(&chain);
             let h = tokio::spawn(async move {
                 let _slot = slot;
-                match session::serve(stream, responder).await {
+                match session::serve(stream, responder, chain).await {
                     Ok(()) => rbitcoin_log::info!("sv2: disconnect {peer}"),
                     Err(e) => rbitcoin_log::info!("sv2: disconnect {peer} ({e})"),
                 }
@@ -120,3 +126,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
 
 #[cfg(test)]
 mod listener_tests;
+#[cfg(test)]
+mod template_tests;
+#[cfg(test)]
+mod test_chain;

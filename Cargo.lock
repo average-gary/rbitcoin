@@ -1083,7 +1083,13 @@ dependencies = [
  "codec_sv2",
  "common_messages_sv2",
  "noise_sv2",
+ "rbitcoin-consensus",
  "rbitcoin-log",
+ "rbitcoin-net",
+ "rbitcoin-primitives",
+ "rbitcoin-query",
+ "rbitcoin-store",
+ "template_distribution_sv2",
  "tokio",
 ]
 
@@ -1322,6 +1328,15 @@ name = "sync_wrapper"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
+
+[[package]]
+name = "template_distribution_sv2"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "859d37310c5802cfafdc1423c1e8fb0fec287a95ee19ac648424f3c811e98152"
+dependencies = [
+ "binary_sv2",
+]
 
 [[package]]
 name = "tokio"

@@ -9,6 +9,9 @@ description = "Stratum v2 Template Distribution Protocol server (Noise over TCP)
 
 [dependencies]
 rbitcoin-log = { workspace = true }
+rbitcoin-consensus = { workspace = true }
+rbitcoin-net = { workspace = true }
+rbitcoin-store = { workspace = true }
 bitcoin = { workspace = true }
 tokio = { workspace = true }
 # Stratum v2 wire crates, pinned to the Step 0 spike set
@@ -18,6 +21,11 @@ noise_sv2 = "=2.0.0"
 codec_sv2 = { version = "=7.0.0", features = ["noise_sv2"] }
 binary_sv2 = "=7.0.0"
 common_messages_sv2 = "=9.0.0"
+template_distribution_sv2 = "=7.0.0"
+
+[dev-dependencies]
+rbitcoin-primitives = { workspace = true }
+rbitcoin-query = { workspace = true }
 
 [lints]
 workspace = true

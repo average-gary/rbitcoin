@@ -1,3 +1,4 @@
+use crate::test_chain::padded_chain;
 use crate::testutil::TpClient;
 use crate::{run_sv2_tp, Sv2TpConfig, MAX_SESSIONS};
 use common_messages_sv2::{
@@ -35,8 +36,10 @@ async fn expect_error(c: &mut TpClient, flags: u32, code: &str) {
 
 #[tokio::test]
 async fn setup_connection_success_errors_and_session_cap() {
+    let tc = padded_chain("sv2-listener", 0);
     let tp = run_sv2_tp(Sv2TpConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
+        chain: tc.chain.clone(),
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
     })

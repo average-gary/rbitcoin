@@ -68,8 +68,8 @@ three unused subprotocol crates) if it adds nothing.
 ## Constraints (all plans)
 
 - New crate `crates/rbitcoin-sv2` (Plan B), service pattern of
-  electrum/esplora: depends on `rbitcoin-query` / `rbitcoin-net` /
-  `rbitcoin-mempool` / `rbitcoin-consensus`; wired in `rbitcoin-node`
+  electrum/esplora: depends on `rbitcoin-net` (`ChainHub`, `MempoolHub`) /
+  `rbitcoin-consensus` / `rbitcoin-store` (merkle); wired in `rbitcoin-node`
   `run.rs` behind flags. Nothing starts without `--sv2-tp-listen`.
 - `binary_sv2` byte-buffer types and `noise_sv2`'s `secp256k1` 0.28 stay
   inside `rbitcoin-sv2`; consensus decode uses the workspace
@@ -214,21 +214,27 @@ Ships the listener, bootstrap, tip push, transaction data, and
 - **Verify:** `cargo test -p rbitcoin-store --lib merkle_`, Electrum /
   Esplora merkle journeys
 
-### B3 — Template builder with TDP coinbase
+### B3 — Template builder, NewTemplate on constraints
 
-- **Contract:** `build(hub, tip, constraints) -> TemplateRecord` calls
+- **Contract:** after setup, `CoinbaseOutputConstraints` makes the session
+  build in a blocking region and send `NewTemplate{future_template: true}`
+  with a strictly increasing `template_id`; a re-sent constraints message
+  rebuilds with the new budget. The build calls
   `MempoolHub::select_block_template` with the per-session budget
   ([Constraints](#constraints-all-plans)); `coinbase_prefix` is the BIP34
   height push; `value_remaining` = subsidy + Σ selected fees (from the
   selection, not a re-read); outputs = witness commitment last;
-  `merkle_path` from B2's `merkle_branch`; the record carries the serialized non-coinbase
-  txs in selection order.
-- **Red:** `cargo test -p rbitcoin-sv2 template_` — synthetic mempool
-  (reuse `rbitcoin-mempool` accept fixtures): weight bound at the reserved
-  edge, sigops at a large `max_additional_sigops`, fee sum, prefix bytes,
-  commitment, tx order.
-- **Green:** builder module in `rbitcoin-sv2`; subsidy/params from
-  `rbitcoin-consensus`.
+  `merkle_path` from B2's `merkle_branch` over the selection order.
+- **Red:** `cargo test -p rbitcoin-sv2 template_` — loopback test client
+  against a padded regtest `ChainHub` with an attached `MempoolHub`
+  (Libre policy admits a high-sigop output script): weight bound at the
+  reserved edge, sigops at a large `max_additional_sigops`, fee sum,
+  prefix bytes, commitment, tx order via the merkle fold.
+- **Green:** builder module in `rbitcoin-sv2`; subsidy from
+  `rbitcoin-consensus`, version and min fee from `ChainHub`. The listener
+  config carries the `ChainHub`. Sending in this step keeps the builder
+  reachable from the shipped path (no test-only caller); tx retention
+  lands with its first reader in B5.
 - **Refactor:** none expected (commitment and selection already have one
   owner).
 - **Verify:** `cargo test -p rbitcoin-sv2 template_`
@@ -247,8 +253,8 @@ Ships the listener, bootstrap, tip push, transaction data, and
   against the node tip and mempool, and SetNewPrevHash consistency. Gate
   predicate unit in `rbitcoin-sv2`.
 - **Green:** `run.rs` service start behind `--sv2-tp-listen` /
-  `--sv2-tp-authority-sec` / `--sv2-tp-cert-validity`; session loop calls
-  the builder on first constraints; per-session template map.
+  `--sv2-tp-authority-sec` / `--sv2-tp-cert-validity`; `SetNewPrevHash`
+  after the first B3 `NewTemplate`; sync gate before the first build.
 - **Refactor:** flag plumbing follows the `esplora_block_template` config
   pattern.
 - **Verify:** `cargo test -p rbitcoin-test sv2_tp_bootstrap`,
@@ -263,7 +269,8 @@ Ships the listener, bootstrap, tip push, transaction data, and
   "template-id-not-found"}`.
 - **Red:** extend the B4 journey: request the served template's data,
   assert count/order/bytes against the mempool txs; unknown-id error.
-- **Green:** session cache read path.
+- **Green:** per-session template map retaining the witness-serialized
+  txs (the named RAM trade), and its read path.
 - **Refactor:** none expected.
 - **Verify:** same journey filter.
 

@@ -5,6 +5,9 @@ use binary_sv2::Str0255;
 use common_messages_sv2::{Protocol, SetupConnection, MESSAGE_TYPE_SETUP_CONNECTION};
 use std::io;
 use std::net::SocketAddr;
+use template_distribution_sv2::{
+    CoinbaseOutputConstraints, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS,
+};
 use tokio::net::TcpStream;
 
 pub struct TpClient {
@@ -46,6 +49,20 @@ impl TpClient {
             device_id: s(""),
         };
         self.conn.send(MESSAGE_TYPE_SETUP_CONNECTION, msg).await
+    }
+
+    pub async fn coinbase_output_constraints(
+        &mut self,
+        max_additional_size: u32,
+        max_additional_sigops: u16,
+    ) -> io::Result<()> {
+        let msg = CoinbaseOutputConstraints {
+            coinbase_output_max_additional_size: max_additional_size,
+            coinbase_output_max_additional_sigops: max_additional_sigops,
+        };
+        self.conn
+            .send(MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS, msg)
+            .await
     }
 
     pub async fn recv(&mut self) -> io::Result<Frame> {
