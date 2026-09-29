@@ -46,6 +46,15 @@ pub struct Sv2TpHandle {
 }
 
 impl Sv2TpHandle {
+    /// `authority_pubkey` as SRI `key-utils` prints it (the form JDC and pool
+    /// configs take): base58check of version `1u16` LE, then the x-only key.
+    pub fn authority_key(&self) -> String {
+        let mut v = [0u8; 34];
+        v[..2].copy_from_slice(&1u16.to_le_bytes());
+        v[2..].copy_from_slice(&self.authority_pubkey);
+        bitcoin::base58::encode_check(&v)
+    }
+
     pub async fn shutdown(self) {
         self.task.abort();
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());

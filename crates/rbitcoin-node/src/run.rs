@@ -1756,9 +1756,9 @@ async fn start_sv2_tp(config: &NodeConfig, hub: &Arc<ChainHub>) -> Option<Sv2TpH
     match run_sv2_tp(cfg).await {
         Ok(h) => {
             info!(
-                "sv2 TP on {} (authority x-only pubkey {})",
+                "sv2 TP on {} (authority pubkey {})",
                 h.local_addr,
-                bitcoin::hex::DisplayHex::to_lower_hex_string(&h.authority_pubkey[..])
+                h.authority_key()
             );
             Some(h)
         }

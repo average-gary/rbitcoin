@@ -87,3 +87,34 @@ async fn setup_connection_success_errors_and_session_cap() {
 
     tp.shutdown().await;
 }
+
+/// key-utils 1.2.0 vector: SRI clients configure the TP authority key in
+/// this form, so the handle must print it, and a client must connect with it.
+#[tokio::test]
+async fn authority_key_prints_in_key_utils_base58check() {
+    let secret = bitcoin::base58::decode_check("zmBEmPhqo3A92FkiLVvyCz6htc3e53ph3ZbD4ASqGaLjwnFLi")
+        .expect("vector secret");
+    let tc = padded_chain("sv2-authority-key", 0);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: std::sync::Arc::clone(&tc.chain),
+        authority_secret: secret.try_into().expect("32-byte secret"),
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+    })
+    .await
+    .expect("listen");
+    let key = tp.authority_key();
+    assert_eq!(key, "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan");
+
+    let decoded = bitcoin::base58::decode_check(&key).unwrap();
+    let pk: [u8; 32] = decoded[2..].try_into().unwrap();
+    let mut c = TpClient::connect(tp.local_addr, pk)
+        .await
+        .expect("handshake against the printed key");
+    c.setup_connection(TDP, 2, 2, 0).await.unwrap();
+    let mut f = c.recv().await.expect("setup reply");
+    assert_eq!(f.msg_type, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
+    let _: SetupConnectionSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    tp.shutdown().await;
+}

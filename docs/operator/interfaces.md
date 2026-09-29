@@ -275,8 +275,9 @@ is **off**; there is no plaintext mode.
 | `--sv2-tp-stale-grace SECS` (`sv2_tp_stale_grace`) | 10 | How long templates on a replaced tip still answer; `0` retires them at once |
 
 `--sv2-tp-listen` needs one of the authority flags. At startup the node logs
-`sv2 TP on ADDR (authority x-only pubkey HEX)`; configure that key as the
-TP authority in the client. No templates are sent while the node is in IBD.
+`sv2 TP on ADDR (authority pubkey KEY)`. KEY is in the SRI `key-utils`
+base58check form (`9b…`); configure it as the TP authority public key in the
+client. No templates are sent while the node is in IBD.
 Each session keeps its last 3 templates. A request for an older template id
 answers `stale-template-id`, and an undecodable or out-of-window
 `SubmitSolution` is logged and dropped.

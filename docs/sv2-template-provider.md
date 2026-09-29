@@ -365,6 +365,15 @@ Ships the listener, bootstrap, tip push, transaction data, and
 - **Refactor:** `extraArgs` still appends last.
 - **Verify:** `nix build .#checks.x86_64-linux.nixos-module-eval --no-link`
 
+### B8c — Authority key in `key-utils` form
+
+- **Contract:** the startup log prints the authority public key as SRI
+  `key-utils` `Secp256k1PublicKey` (base58check of version `1u16` LE plus
+  the x-only key), the form SRI clients take. Hex is not accepted there.
+- **Red:** `listener_tests.rs` `authority_key_prints_in_key_utils_base58check`
+  pins the key-utils 1.2.0 vector and connects with the decoded key.
+- **Green:** `Sv2TpHandle::authority_key()`; `run.rs` logs it.
+
 ---
 
 ## Plan C — Fee-delta push
