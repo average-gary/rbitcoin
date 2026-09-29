@@ -443,7 +443,7 @@ in
         type = types.nullOr types.str;
         default = null;
         example = "/run/keys/sv2-authority";
-        description = "Runtime path to the 64-hex secp256k1 authority secret, readable by the service user. Passed as --sv2-tp-authority-sec-file so the key stays out of argv. A store path (including an interpolated `./key`) is refused: the store is world-readable.";
+        description = "Runtime path to the secp256k1 authority secret (64 hex or SRI key-utils base58check), readable by the service user. Passed as --sv2-tp-authority-sec-file so the key stays out of argv. A store path (including an interpolated `./key`) is refused: the store is world-readable.";
       };
 
       certValidity = mkOption {

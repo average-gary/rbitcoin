@@ -339,7 +339,7 @@ Ships the listener, bootstrap, tip push, transaction data, and
 ### B8a — Authority secret from a file
 
 - **Contract:** `--sv2-tp-authority-sec-file PATH` (conf
-  `sv2_tp_authority_sec_file`) reads the same 64-hex secret from a file at
+  `sv2_tp_authority_sec_file`) reads the same secret from a file at
   parse time. A hex value in argv shows in `ps` and in a NixOS unit in the
   world-readable store; the file keeps it out of both. Errors name the knob
   and never echo the key.
@@ -373,6 +373,16 @@ Ships the listener, bootstrap, tip push, transaction data, and
 - **Red:** `listener_tests.rs` `authority_key_prints_in_key_utils_base58check`
   pins the key-utils 1.2.0 vector and connects with the decoded key.
 - **Green:** `Sv2TpHandle::authority_key()`; `run.rs` logs it.
+
+### B8d — Authority secret in `key-utils` form
+
+- **Contract:** `--sv2-tp-authority-sec` and the file also take SRI
+  `key-utils` `Secp256k1SecretKey` (base58check of the raw 32 bytes), so a
+  key generated for an SRI deployment works as is. 64 hex still parses.
+- **Red:** node lib `sv2_tp_authority_sec_takes_key_utils_base58check`: the
+  key-utils vector secret, inline and from a file, yields the vector pubkey;
+  a bad checksum names the knob without echoing the key.
+- **Green:** `parse_authority_sec` falls back to base58check.
 
 ---
 

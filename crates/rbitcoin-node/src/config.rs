@@ -1451,11 +1451,17 @@ fn is_conf_true(val: &str) -> bool {
 
 /// Parse `1`/`true`/`yes`/`on` → true; `0`/`false`/`no`/`off` → false.
 /// The error never echoes `val`: it is a secret.
+/// 64 hex, or SRI `key-utils` `Secp256k1SecretKey` base58check (the raw 32 bytes).
 fn parse_authority_sec(key: &str, val: &str) -> Result<[u8; 32], NodeError> {
     <[u8; 32]>::from_hex(val)
         .ok()
+        .or_else(|| bitcoin::base58::decode_check(val).ok()?.try_into().ok())
         .filter(|k| bitcoin::secp256k1::SecretKey::from_slice(k).is_ok())
-        .ok_or_else(|| NodeError::Config(format!("conf {key}: want a 64-hex secp256k1 secret key")))
+        .ok_or_else(|| {
+            NodeError::Config(format!(
+                "conf {key}: want a secp256k1 secret key (64 hex or key-utils base58check)"
+            ))
+        })
 }
 
 fn parse_conf_bool(val: &str) -> Result<bool, String> {
@@ -1669,6 +1675,43 @@ mod tests {
             assert!(e.contains("sv2_tp_authority_sec_file"), "{e}");
             assert!(!e.contains(&"00".repeat(32)), "never echo the key: {e}");
         }
+    }
+
+    /// key-utils 1.2.0 vector: SRI configs carry the authority secret as
+    /// `Secp256k1SecretKey` base58check; its pubkey is the one the TP prints.
+    #[test]
+    fn sv2_tp_authority_sec_takes_key_utils_base58check() {
+        let secret = "zmBEmPhqo3A92FkiLVvyCz6htc3e53ph3ZbD4ASqGaLjwnFLi";
+        let dir = tmp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sv2-authority.key");
+        std::fs::write(&file, format!("{secret}\n")).unwrap();
+        for (k, v) in [
+            ("sv2_tp_authority_sec", secret),
+            ("sv2_tp_authority_sec_file", file.to_str().unwrap()),
+        ] {
+            let mut c = NodeConfig::default().with_datadir(dir.clone());
+            assert_eq!(c.apply_kv(k, v).unwrap(), ConfApply::Applied);
+            let kp = bitcoin::secp256k1::Keypair::from_seckey_slice(
+                &bitcoin::secp256k1::Secp256k1::new(),
+                &c.sv2_tp_authority_sec.unwrap(),
+            )
+            .unwrap();
+            let mut pk = vec![1, 0];
+            pk.extend(kp.x_only_public_key().0.serialize());
+            assert_eq!(
+                bitcoin::base58::encode_check(&pk),
+                "9bDuixKmZqAJnrmP746n8zU1wyAQRrus7th9dxnkPg6RzQvCnan"
+            );
+        }
+        let mut c = NodeConfig::default();
+        let bad_check = format!("{}1", &secret[..secret.len() - 1]);
+        let e = format!(
+            "{}",
+            c.apply_kv("sv2_tp_authority_sec", &bad_check).unwrap_err()
+        );
+        assert!(e.contains("sv2_tp_authority_sec"), "{e}");
+        assert!(!e.contains(&bad_check), "never echo the key: {e}");
     }
 
     #[test]

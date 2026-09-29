@@ -269,8 +269,8 @@ is **off**; there is no plaintext mode.
 | Flag (conf key) | Default | Meaning |
 |---|---|---|
 | `--sv2-tp-listen ADDR` (`sv2_tp_listen`) | off | TCP bind for TDP clients |
-| `--sv2-tp-authority-sec-file PATH` (`sv2_tp_authority_sec_file`) | — | File holding the 64-hex secp256k1 authority secret |
-| `--sv2-tp-authority-sec HEX` (`sv2_tp_authority_sec`) | — | The same secret inline. Argv shows in `ps`; prefer the file or the conf file |
+| `--sv2-tp-authority-sec-file PATH` (`sv2_tp_authority_sec_file`) | — | File holding the secp256k1 authority secret: 64 hex, or the SRI `key-utils` base58check form |
+| `--sv2-tp-authority-sec KEY` (`sv2_tp_authority_sec`) | — | The same secret inline. Argv shows in `ps`; prefer the file or the conf file |
 | `--sv2-tp-cert-validity SECS` (`sv2_tp_cert_validity`) | 3600 | Lifetime of each per-connection Noise certificate |
 | `--sv2-tp-stale-grace SECS` (`sv2_tp_stale_grace`) | 10 | How long templates on a replaced tip still answer; `0` retires them at once |
 
