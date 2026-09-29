@@ -1,6 +1,6 @@
 use crate::test_chain::{padded_chain, TestChain};
 use crate::testutil::TpClient;
-use crate::{run_sv2_tp, Sv2TpConfig};
+use crate::{run_sv2_tp, Sv2TpConfig, SETUP_TIMEOUT};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{
@@ -177,6 +177,7 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -218,6 +219,7 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -265,6 +267,7 @@ async fn submit_solution_checks_pow_before_accept() {
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -377,6 +380,7 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
     })
     .await
     .expect("listen");

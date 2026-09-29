@@ -109,12 +109,20 @@ pub(crate) async fn serve(
     responder: Box<Responder>,
     chain: Arc<ChainHub>,
     stale_grace: Duration,
+    setup_timeout: Duration,
 ) -> io::Result<()> {
-    let mut conn = NoiseConn::accept(stream, responder).await?;
-    let frame = conn.recv().await?;
-    if !on_setup(&mut conn, frame).await? {
+    let deadline = Instant::now() + setup_timeout;
+    let setup = async {
+        let mut conn = NoiseConn::accept(stream, responder).await?;
+        let frame = conn.recv().await?;
+        Ok::<_, io::Error>(on_setup(&mut conn, frame).await?.then_some(conn))
+    };
+    let Some(conn) = tokio::time::timeout_at(deadline, setup)
+        .await
+        .map_err(|_| missed_setup_deadline())??
+    else {
         return Ok(());
-    }
+    };
     let (mut reader, writer) = conn.into_split();
     let (frames_tx, mut frames) = mpsc::channel(1);
     // Dropping the set aborts the reader when the session ends.
@@ -136,7 +144,11 @@ pub(crate) async fn serve(
         templates: Templates::default(),
         held_logged: false,
     };
-    s.run(&mut frames).await
+    s.run(&mut frames, deadline).await
+}
+
+fn missed_setup_deadline() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "sv2: setup deadline")
 }
 
 struct Session {
@@ -150,7 +162,14 @@ struct Session {
 }
 
 impl Session {
-    async fn run(&mut self, frames: &mut mpsc::Receiver<io::Result<Frame>>) -> io::Result<()> {
+    /// `setup_deadline` also covers the first `CoinbaseOutputConstraints`:
+    /// until then the session can never get a template, so it never writes
+    /// and the write deadline cannot free its slot.
+    async fn run(
+        &mut self,
+        frames: &mut mpsc::Receiver<io::Result<Frame>>,
+        setup_deadline: Instant,
+    ) -> io::Result<()> {
         let mut tips = self.chain.subscribe_tips();
         loop {
             let retire_at = self.templates.next_retire();
@@ -170,6 +189,9 @@ impl Session {
                     if retire_at.is_some() =>
                 {
                     self.templates.retire(Instant::now());
+                }
+                _ = tokio::time::sleep_until(setup_deadline), if self.constraints.is_none() => {
+                    return Err(missed_setup_deadline());
                 }
             }
         }

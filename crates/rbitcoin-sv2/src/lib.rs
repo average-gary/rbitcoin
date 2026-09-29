@@ -25,6 +25,10 @@ pub use transport::Frame;
 /// cap bounds retention at ≤ ~96 MB.
 pub const MAX_SESSIONS: usize = 8;
 
+/// Default [`Sv2TpConfig::setup_timeout`]. A session holds a slot from TCP
+/// accept, so without it [`MAX_SESSIONS`] silent sockets lock clients out.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+
 pub struct Sv2TpConfig {
     pub listen: SocketAddr,
     /// Tip, params, and the attached mempool the templates are built from.
@@ -35,6 +39,11 @@ pub struct Sv2TpConfig {
     pub cert_validity: Duration,
     /// How long a template on a replaced prev hash still answers requests.
     pub stale_grace: Duration,
+    /// Deadline from TCP accept through the Noise handshake,
+    /// `SetupConnection`, and the first `CoinbaseOutputConstraints` (without
+    /// which the session never writes). No read deadline after that: TDP has
+    /// no keepalive and a client may stay silent while the TP pushes.
+    pub setup_timeout: Duration,
 }
 
 pub struct Sv2TpHandle {
@@ -80,6 +89,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let authority_secret = config.authority_secret;
     let cert_validity = config.cert_validity;
     let stale_grace = config.stale_grace;
+    let setup_timeout = config.setup_timeout;
     let chain = config.chain;
     let listener = TcpListener::bind(config.listen).await?;
     let local_addr = listener.local_addr()?;
@@ -117,7 +127,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             let chain = Arc::clone(&chain);
             let h = tokio::spawn(async move {
                 let _slot = slot;
-                match session::serve(stream, responder, chain, stale_grace).await {
+                match session::serve(stream, responder, chain, stale_grace, setup_timeout).await {
                     Ok(()) => rbitcoin_log::info!("sv2: disconnect {peer}"),
                     Err(e) => rbitcoin_log::info!("sv2: disconnect {peer} ({e})"),
                 }

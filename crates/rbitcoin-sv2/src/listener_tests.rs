@@ -1,12 +1,13 @@
 use crate::test_chain::padded_chain;
 use crate::testutil::TpClient;
-use crate::{run_sv2_tp, Sv2TpConfig, MAX_SESSIONS};
+use crate::{run_sv2_tp, Sv2TpConfig, MAX_SESSIONS, SETUP_TIMEOUT};
 use common_messages_sv2::{
     SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
     MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
 };
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+use template_distribution_sv2::MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR;
 
 const TDP: u8 = 2;
 
@@ -43,6 +44,7 @@ async fn setup_connection_success_errors_and_session_cap() {
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -101,6 +103,7 @@ async fn authority_key_prints_in_key_utils_base58check() {
         authority_secret: secret.try_into().expect("32-byte secret"),
         cert_validity: Duration::from_secs(3600),
         stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
     })
     .await
     .expect("listen");
@@ -116,5 +119,99 @@ async fn authority_key_prints_in_key_utils_base58check() {
     let mut f = c.recv().await.expect("setup reply");
     assert_eq!(f.msg_type, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
     let _: SetupConnectionSuccess = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    tp.shutdown().await;
+}
+
+/// Silent sockets take every slot at accept; the setup deadline must close
+/// them so a real client gets in.
+#[tokio::test]
+async fn silent_sockets_are_dropped_at_the_setup_deadline() {
+    use tokio::io::AsyncReadExt;
+
+    let tc = padded_chain("sv2-setup-deadline", 0);
+    let setup_timeout = Duration::from_millis(300);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: std::sync::Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout,
+    })
+    .await
+    .expect("listen");
+    let (addr, pk) = (tp.local_addr, tp.authority_pubkey);
+
+    let mut silent = Vec::new();
+    for _ in 0..MAX_SESSIONS {
+        silent.push(tokio::net::TcpStream::connect(addr).await.expect("tcp"));
+    }
+    for s in &mut silent {
+        let mut b = [0u8; 1];
+        let closed = tokio::time::timeout(setup_timeout * 10, s.read(&mut b)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0) | Err(_))),
+            "silent socket must be closed after the setup deadline"
+        );
+    }
+
+    let mut c = connect_when_free(addr, pk).await;
+    c.setup_connection(TDP, 2, 2, 0).await.unwrap();
+    let f = c.recv().await.expect("setup reply");
+    assert_eq!(f.msg_type, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS);
+    tp.shutdown().await;
+}
+
+/// A TDP session without `CoinbaseOutputConstraints` never gets a template
+/// and never writes, so the setup deadline also covers the first constraints.
+/// Other frames before them do not reset it.
+#[tokio::test]
+async fn session_without_constraints_is_dropped_at_the_setup_deadline() {
+    let tc = padded_chain("sv2-constraints-deadline", 0);
+    let setup_timeout = Duration::from_millis(300);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: std::sync::Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout,
+    })
+    .await
+    .expect("listen");
+    let (addr, pk) = (tp.local_addr, tp.authority_pubkey);
+
+    let mut idle = TpClient::connect(addr, pk).await.expect("handshake");
+    idle.setup_connection(TDP, 2, 2, 0).await.unwrap();
+    idle.recv().await.expect("setup reply");
+    idle.request_transaction_data(1).await.unwrap();
+    let f = idle
+        .recv()
+        .await
+        .expect("request answered before constraints");
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+
+    let mut ok = TpClient::connect(addr, pk).await.expect("handshake");
+    ok.setup_connection(TDP, 2, 2, 0).await.unwrap();
+    ok.recv().await.expect("setup reply");
+    ok.coinbase_output_constraints(1, 1).await.unwrap();
+
+    let closed = tokio::time::timeout(setup_timeout * 10, async {
+        while idle.recv().await.is_ok() {}
+    })
+    .await;
+    assert!(closed.is_ok(), "session without constraints must be closed");
+
+    tokio::time::sleep(setup_timeout * 2).await;
+    ok.request_transaction_data(u64::MAX).await.unwrap();
+    loop {
+        let f = ok
+            .recv()
+            .await
+            .expect("session with constraints stays open");
+        if f.msg_type == MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR {
+            break;
+        }
+    }
     tp.shutdown().await;
 }

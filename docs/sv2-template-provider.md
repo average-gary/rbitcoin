@@ -86,6 +86,15 @@ three unused subprotocol crates) if it adds nothing.
 - Session cap (always on): the listener accepts at most 8 concurrent
   sessions and closes the next one after accept, like Electrum's
   `max_connections` semaphore. Per-IP metering stays out of scope.
+- Setup deadline: a session holds its slot from TCP accept, so the Noise
+  handshake, `SetupConnection`, and the first `CoinbaseOutputConstraints`
+  must all arrive within 10 s (`SETUP_TIMEOUT`) or the socket is closed.
+  The client sends constraints right after setup (sv2-spec 07); without
+  them the session never gets a template, never writes, and the write
+  deadline cannot free the slot. Other frames before the first constraints
+  are handled but do not extend the deadline. There is no read deadline
+  after that: TDP has no keepalive and a client may stay silent while the
+  TP pushes.
 - Per-session budget: weight `MAX_BLOCK_WEIGHT − max(1168 +
   4·coinbase_output_max_additional_size, 2000)` WU (sv2-spec 07 §7.1);
   sigops start at `coinbase_output_max_additional_sigops` (Core
