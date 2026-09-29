@@ -1,13 +1,14 @@
 //! Test-only TDP client: a Noise initiator pinned to the TP's authority key.
 
 use crate::transport::{Frame, NoiseConn};
-use binary_sv2::Str0255;
+use binary_sv2::{Str0255, B064K};
 use common_messages_sv2::{Protocol, SetupConnection, MESSAGE_TYPE_SETUP_CONNECTION};
 use std::io;
 use std::net::SocketAddr;
 use template_distribution_sv2::{
-    CoinbaseOutputConstraints, RequestTransactionData, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS,
-    MESSAGE_TYPE_REQUEST_TRANSACTION_DATA,
+    CoinbaseOutputConstraints, RequestTransactionData, SubmitSolution,
+    MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA,
+    MESSAGE_TYPE_SUBMIT_SOLUTION,
 };
 use tokio::net::TcpStream;
 
@@ -71,6 +72,26 @@ impl TpClient {
         self.conn
             .send(MESSAGE_TYPE_REQUEST_TRANSACTION_DATA, msg)
             .await
+    }
+
+    pub async fn submit_solution(
+        &mut self,
+        template_id: u64,
+        version: u32,
+        header_timestamp: u32,
+        header_nonce: u32,
+        coinbase_tx: &[u8],
+    ) -> io::Result<()> {
+        let coinbase_tx = B064K::try_from(coinbase_tx)
+            .map_err(|e| io::Error::other(format!("sv2 coinbase: {e:?}")))?;
+        let msg = SubmitSolution {
+            template_id,
+            version,
+            header_timestamp,
+            header_nonce,
+            coinbase_tx,
+        };
+        self.conn.send(MESSAGE_TYPE_SUBMIT_SOLUTION, msg).await
     }
 
     pub async fn recv(&mut self) -> io::Result<Frame> {

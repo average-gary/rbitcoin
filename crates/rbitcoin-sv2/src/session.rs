@@ -4,6 +4,7 @@ use crate::template;
 use crate::transport::{Frame, NoiseConn, NoiseWriter};
 use binary_sv2::{Seq064K, Str0255, B016M, B064K};
 use bitcoin::hashes::Hash;
+use bitcoin::{block, Block, BlockHash, CompactTarget, Transaction, TxMerkleNode};
 use common_messages_sv2::{
     Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
     ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
@@ -13,17 +14,20 @@ use common_messages_sv2::{
 };
 use noise_sv2::Responder;
 use rbitcoin_net::{BlockingRegion, ChainHub};
+use rbitcoin_store::merkle_root_from_txids;
 use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use template_distribution_sv2::{
     CoinbaseOutputConstraints, RequestTransactionData, RequestTransactionDataError,
-    RequestTransactionDataSuccess, ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
+    RequestTransactionDataSuccess, SubmitSolution,
+    ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
     ERROR_CODE_REQUEST_TRANSACTION_DATA_TEMPLATE_ID_NOT_FOUND,
     MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS, MESSAGE_TYPE_NEW_TEMPLATE,
     MESSAGE_TYPE_REQUEST_TRANSACTION_DATA, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR,
     MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS, MESSAGE_TYPE_SET_NEW_PREV_HASH,
+    MESSAGE_TYPE_SUBMIT_SOLUTION,
 };
 use tokio::net::TcpStream;
 use tokio::sync::broadcast::error::RecvError;
@@ -43,38 +47,50 @@ const MAX_RETAINED: usize = 3;
 struct Templates {
     last_id: u64,
     current_prev: Option<[u8; 32]>,
-    /// `(id, template, retire_at)`; `retire_at` is set once the tip moves on.
-    retained: VecDeque<(u64, template::Template, Option<Instant>)>,
+    /// `SetNewPrevHash.header_timestamp` sent for `current_prev`, and when.
+    prev_sent: Option<(u32, Instant)>,
+    retained: VecDeque<Retained>,
+}
+
+struct Retained {
+    id: u64,
+    t: template::Template,
+    prev_sent: (u32, Instant),
+    /// Set once the tip moves on.
+    retire_at: Option<Instant>,
 }
 
 impl Templates {
-    fn retain(&mut self, id: u64, t: template::Template) {
+    fn retain(&mut self, id: u64, t: template::Template, prev_sent: (u32, Instant)) {
         if self.retained.len() == MAX_RETAINED {
             self.retained.pop_front();
         }
-        self.retained.push_back((id, t, None));
+        self.retained.push_back(Retained {
+            id,
+            t,
+            prev_sent,
+            retire_at: None,
+        });
     }
 
-    fn get(&self, id: u64) -> Option<&template::Template> {
-        self.retained
-            .iter()
-            .find(|(i, ..)| *i == id)
-            .map(|(_, t, _)| t)
+    fn get(&self, id: u64) -> Option<&Retained> {
+        self.retained.iter().find(|r| r.id == id)
     }
 
     /// Every retained template predates the new prev hash.
     fn start_grace(&mut self, deadline: Instant) {
-        for (.., at) in &mut self.retained {
-            at.get_or_insert(deadline);
+        for r in &mut self.retained {
+            r.retire_at.get_or_insert(deadline);
         }
     }
 
     fn next_retire(&self) -> Option<Instant> {
-        self.retained.iter().filter_map(|(.., at)| *at).min()
+        self.retained.iter().filter_map(|r| r.retire_at).min()
     }
 
     fn retire(&mut self, now: Instant) {
-        self.retained.retain(|(.., at)| at.is_none_or(|d| d > now));
+        self.retained
+            .retain(|r| r.retire_at.is_none_or(|d| d > now));
     }
 }
 
@@ -167,6 +183,7 @@ impl Session {
             MESSAGE_TYPE_REQUEST_TRANSACTION_DATA => {
                 on_request_transaction_data(&mut self.conn, frame, &self.templates).await?;
             }
+            MESSAGE_TYPE_SUBMIT_SOLUTION => self.on_submit_solution(frame).await?,
             t => rbitcoin_log::info!("sv2: ignoring message {t:#x}"),
         }
         Ok(true)
@@ -206,11 +223,79 @@ impl Session {
             self.conn
                 .send(MESSAGE_TYPE_SET_NEW_PREV_HASH, t.to_prev_hash(template_id))
                 .await?;
+            let now = Instant::now();
             self.templates.current_prev = Some(t.prev_hash);
-            self.templates
-                .start_grace(Instant::now() + self.stale_grace);
+            self.templates.prev_sent = Some((t.header_timestamp, now));
+            self.templates.start_grace(now + self.stale_grace);
         }
-        self.templates.retain(template_id, t);
+        let prev_sent = self
+            .templates
+            .prev_sent
+            .ok_or_else(|| io::Error::other("sv2: template before SetNewPrevHash"))?;
+        self.templates.retain(template_id, t, prev_sent);
+        Ok(())
+    }
+
+    /// A bad solution is logged and dropped; a decodable one on a retained
+    /// template always goes to `ChainHub::accept_block`.
+    async fn on_submit_solution(&mut self, mut frame: Frame) -> io::Result<()> {
+        let Ok(m) = binary_sv2::from_bytes::<SubmitSolution>(&mut frame.payload) else {
+            rbitcoin_log::info!("sv2: undecodable SubmitSolution");
+            return Ok(());
+        };
+        let Some(r) = self.templates.get(m.template_id) else {
+            rbitcoin_log::info!("sv2: SubmitSolution for unknown template {}", m.template_id);
+            return Ok(());
+        };
+        // The client may roll time forward from the sent timestamp by at
+        // most the wall time since it was sent.
+        let (sent_ts, sent_at) = r.prev_sent;
+        let rolled =
+            u64::try_from(sent_at.elapsed().as_millis().div_ceil(1000)).unwrap_or(u64::MAX);
+        if u64::from(m.header_timestamp) < u64::from(sent_ts)
+            || u64::from(m.header_timestamp) > u64::from(sent_ts).saturating_add(rolled)
+        {
+            rbitcoin_log::info!(
+                "sv2: SubmitSolution header_timestamp {} outside [{sent_ts}, +{rolled}s]",
+                m.header_timestamp
+            );
+            return Ok(());
+        }
+        let Ok(coinbase) = bitcoin::consensus::deserialize::<Transaction>(m.coinbase_tx.as_ref())
+        else {
+            rbitcoin_log::info!("sv2: undecodable SubmitSolution coinbase");
+            return Ok(());
+        };
+        let mut txdata = Vec::with_capacity(1 + r.t.txs.len());
+        txdata.push(coinbase);
+        txdata.extend(r.t.txs.iter().cloned());
+        let txids: Vec<[u8; 32]> = txdata
+            .iter()
+            .map(|tx| tx.compute_txid().to_byte_array())
+            .collect();
+        let block = Block {
+            header: block::Header {
+                version: block::Version::from_consensus(m.version as i32),
+                prev_blockhash: BlockHash::from_byte_array(r.t.prev_hash),
+                merkle_root: TxMerkleNode::from_byte_array(merkle_root_from_txids(&txids)),
+                time: m.header_timestamp,
+                bits: CompactTarget::from_consensus(r.t.n_bits),
+                nonce: m.header_nonce,
+            },
+            txdata,
+        };
+        let hash = block.block_hash();
+        let c = Arc::clone(&self.chain);
+        let outcome = tokio::task::spawn_blocking(move || {
+            let _g = BlockingRegion::enter();
+            c.accept_block(block)
+        })
+        .await
+        .map_err(io::Error::other)?;
+        match outcome {
+            Ok(o) => rbitcoin_log::info!("sv2: SubmitSolution {hash}: {o:?}"),
+            Err(e) => rbitcoin_log::info!("sv2: SubmitSolution {hash} rejected: {e}"),
+        }
         Ok(())
     }
 }
@@ -271,7 +356,7 @@ async fn on_request_transaction_data(
         rbitcoin_log::info!("sv2: undecodable RequestTransactionData");
         return Ok(());
     };
-    let Some(t) = templates.get(template_id) else {
+    let Some(Retained { t, .. }) = templates.get(template_id) else {
         let code = if template_id <= templates.last_id {
             ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID
         } else {

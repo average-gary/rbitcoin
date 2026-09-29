@@ -2769,7 +2769,10 @@ async fn sv2_recv(c: &mut rbitcoin_sv2::testutil::TpClient) -> rbitcoin_sv2::Fra
 struct Sv2Template {
     template_id: u64,
     future_template: bool,
+    version: u32,
+    coinbase_prefix: Vec<u8>,
     value_remaining: u64,
+    coinbase_outputs: Vec<u8>,
     merkle_path: Vec<[u8; 32]>,
 }
 
@@ -2782,12 +2785,37 @@ fn sv2_template(mut f: rbitcoin_sv2::Frame) -> Sv2Template {
     Sv2Template {
         template_id: t.template_id,
         future_template: t.future_template,
+        version: t.version,
+        coinbase_prefix: t.coinbase_prefix.as_ref().to_vec(),
         value_remaining: t.coinbase_tx_value_remaining,
+        coinbase_outputs: t.coinbase_tx_outputs.as_ref().to_vec(),
         merkle_path: t
             .merkle_path
             .iter()
             .map(|h| h.as_ref().try_into().unwrap())
             .collect(),
+    }
+}
+
+/// Coinbase the template describes: OP_TRUE payout, then the TP's outputs.
+fn sv2_coinbase(t: &Sv2Template) -> Transaction {
+    let tp_out: TxOut = bitcoin::consensus::deserialize(&t.coinbase_outputs).unwrap();
+    Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(t.coinbase_prefix.clone()),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[[0u8; 32]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(t.value_remaining),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            tp_out,
+        ],
     }
 }
 
@@ -2960,6 +2988,76 @@ async fn sv2_tp_bootstrap() {
         .await
         .unwrap();
     assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).0, pushed.template_id);
+
+    // A solution the TP cannot decode is dropped; the session keeps serving.
+    c.submit_solution(
+        pushed.template_id,
+        pushed.version,
+        p.header_timestamp,
+        0,
+        &[0xff; 8],
+    )
+    .await
+    .unwrap();
+    c.request_transaction_data(pushed.template_id)
+        .await
+        .unwrap();
+    assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).2.len(), 1);
+    let best = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await;
+    assert_eq!(best["result"], mined.to_string());
+
+    // Grind the pushed template (it carries the RPC tx) and submit it.
+    let coinbase = sv2_coinbase(&pushed);
+    let root =
+        pushed
+            .merkle_path
+            .iter()
+            .fold(coinbase.compute_txid().to_byte_array(), |acc, sibling| {
+                let mut buf = [0u8; 64];
+                buf[..32].copy_from_slice(&acc);
+                buf[32..].copy_from_slice(sibling);
+                bitcoin::hashes::sha256d::Hash::hash(&buf).to_byte_array()
+            });
+    let mut header = bitcoin::block::Header {
+        version: bitcoin::block::Version::from_consensus(pushed.version as i32),
+        prev_blockhash: mined,
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
+        time: p.header_timestamp,
+        bits: bitcoin::CompactTarget::from_consensus(p.n_bits),
+        nonce: 0,
+    };
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        pushed.template_id,
+        pushed.version,
+        header.time,
+        header.nonce,
+        &bitcoin::consensus::encode::serialize(&coinbase),
+    )
+    .await
+    .unwrap();
+    let solved = header.block_hash();
+    let next = sv2_template(sv2_recv(&mut c).await);
+    assert!(next.future_template);
+    let mut f = sv2_recv(&mut c).await;
+    let p: SetNewPrevHash = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(
+        p.prev_hash.as_ref(),
+        solved.to_byte_array(),
+        "solved block is the tip"
+    );
+    let best = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await;
+    assert_eq!(best["result"], solved.to_string());
+    let block = jsonrpc(rpc_addr, "getblock", json!([solved.to_string(), 1])).await;
+    assert_eq!(
+        block["result"]["tx"],
+        json!([
+            coinbase.compute_txid().to_string(),
+            tx.compute_txid().to_string()
+        ])
+    );
 
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;

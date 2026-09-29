@@ -331,7 +331,9 @@ Ships the listener, bootstrap, tip push, transaction data, and
   session healthy.
 - **Green:** assembly + pre-checks in a blocking region; accept via
   ChainHub.
-- **Refactor:** solution assembly shares the B2 merkle fold.
+- **Refactor:** assembly recomputes the root over `[coinbase, retained
+  txs…]` with the store's `merkle_root_from_txids` (the B2 selection
+  helper), not by folding the sent path.
 - **Verify:** journey filter.
 
 ### B8 — Operator surface
