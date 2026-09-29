@@ -239,22 +239,42 @@ Ships the listener, bootstrap, tip push, transaction data, and
   owner).
 - **Verify:** `cargo test -p rbitcoin-sv2 template_`
 
-### B4 — Node wiring + bootstrap flow
+### B4a — SetNewPrevHash + sync gate
 
-- **Contract:** with `--sv2-tp-listen` set, the node serves the listener; a
-  client completing setup and sending `CoinbaseOutputConstraints`
-  immediately receives `NewTemplate{future_template: true}` then
-  `SetNewPrevHash` with the same `template_id`, the current tip as
-  `prev_hash`, and matching nBits/target. While the GBT sync gate says
-  not-synced, the session holds the constraints and sends the first
-  template when the gate clears.
+- **Contract:** the first template on a prev hash is
+  `NewTemplate{future_template: true}` followed by `SetNewPrevHash` with
+  the same `template_id`, the tip as `prev_hash`, `header_timestamp` ≥
+  MTP + 1, and the next nBits with its target. A later template on the
+  same prev hash (re-sent constraints) is `future_template: false` with no
+  `SetNewPrevHash`. While `ChainHub::in_ibd()` (relay-inhibited: stale tip
+  or below min chain work), the session holds the constraints and builds
+  when a tip event clears it. `getblocktemplate` has no sync gate in this
+  node, so the TP gate is the relay gate; leaving IBD always comes with a
+  new tip.
+- **Red:** `cargo test -p rbitcoin-sv2 --lib` — the B3 template test gains
+  the `SetNewPrevHash` pair and the `future_template: false` rebuilds;
+  `sync_gate_` holds on a stale padded chain and serves after a fresh block
+  is accepted through `ChainHub`.
+- **Green:** tip read once per build (height, header, MTP, bits);
+  per-session current prev hash; gate loop on `subscribe_tips()` in the
+  session.
+- **Refactor:** none expected.
+- **Verify:** `cargo test -p rbitcoin-sv2 --lib`
+
+### B4b — Node wiring + bootstrap journey
+
+- **Contract:** with `--sv2-tp-listen` set, the node serves the listener
+  (`--sv2-tp-authority-sec` required with it, `--sv2-tp-cert-validity`
+  optional); a client completing setup and sending
+  `CoinbaseOutputConstraints` receives the B4a pair against the node tip
+  and mempool once the node leaves IBD.
 - **Red:** `cargo test -p rbitcoin-test sv2_tp_bootstrap` — one regtest
-  node, full handshake → setup → constraints; assert NewTemplate fields
-  against the node tip and mempool, and SetNewPrevHash consistency. Gate
-  predicate unit in `rbitcoin-sv2`.
-- **Green:** `run.rs` service start behind `--sv2-tp-listen` /
-  `--sv2-tp-authority-sec` / `--sv2-tp-cert-validity`; `SetNewPrevHash`
-  after the first B3 `NewTemplate`; sync gate before the first build.
+  node on a padded (stale) chain: handshake → setup → constraints, no
+  template while in IBD, `generateblock` clears the gate, then assert the
+  pair against RPC (`getbestblockhash`, `getblocktemplate` bits) and a
+  mempool tx sent over RPC; config parse units under `sv2_tp_`.
+- **Green:** `run.rs` service start behind the three flags; handle shut
+  down with the other services.
 - **Refactor:** flag plumbing follows the `esplora_block_template` config
   pattern.
 - **Verify:** `cargo test -p rbitcoin-test sv2_tp_bootstrap`,
@@ -267,7 +287,7 @@ Ships the listener, bootstrap, tip push, transaction data, and
   transaction_list}` with the witness-serialized txs in template order;
   unknown id → `RequestTransactionData.Error{error_code:
   "template-id-not-found"}`.
-- **Red:** extend the B4 journey: request the served template's data,
+- **Red:** extend the B4b journey: request the served template's data,
   assert count/order/bytes against the mempool txs; unknown-id error.
 - **Green:** per-session template map retaining the witness-serialized
   txs (the named RAM trade), and its read path.
@@ -360,7 +380,7 @@ when fees rise enough to matter, throttled. Requires Plan B.
 
 Units in `rbitcoin-mempool` (budgeted selection), `rbitcoin-store`
 (merkle path), and `rbitcoin-sv2` (builder, throttle, gate). **One**
-regtest integration journey in `rbitcoin-test`, opened in B4 and extended
+regtest integration journey in `rbitcoin-test`, opened in B4b and extended
 by B5–B7 and C1 — one node open, per [`TESTING.md`](../TESTING.md) budgets.
 No live pool/JDC, no mainnet datadir, no plaintext mode.
 

@@ -11,6 +11,7 @@ description = "Stratum v2 Template Distribution Protocol server (Noise over TCP)
 rbitcoin-log = { workspace = true }
 rbitcoin-consensus = { workspace = true }
 rbitcoin-net = { workspace = true }
+rbitcoin-primitives = { workspace = true }
 rbitcoin-store = { workspace = true }
 bitcoin = { workspace = true }
 tokio = { workspace = true }
@@ -24,7 +25,6 @@ common_messages_sv2 = "=9.0.0"
 template_distribution_sv2 = "=7.0.0"
 
 [dev-dependencies]
-rbitcoin-primitives = { workspace = true }
 rbitcoin-query = { workspace = true }
 
 [lints]

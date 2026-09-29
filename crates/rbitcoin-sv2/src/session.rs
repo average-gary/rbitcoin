@@ -16,8 +16,10 @@ use std::io;
 use std::sync::Arc;
 use template_distribution_sv2::{
     CoinbaseOutputConstraints, MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS, MESSAGE_TYPE_NEW_TEMPLATE,
+    MESSAGE_TYPE_SET_NEW_PREV_HASH,
 };
 use tokio::net::TcpStream;
+use tokio::sync::broadcast::error::RecvError;
 
 const TDP_VERSION: u16 = 2;
 
@@ -41,6 +43,7 @@ pub(crate) async fn serve(
     let mut conn = NoiseConn::accept(stream, responder).await?;
     let mut phase = Phase::AwaitingSetup;
     let mut last_template_id = 0u64;
+    let mut current_prev = None;
     loop {
         let frame = conn.recv().await?;
         let next = match phase {
@@ -49,7 +52,14 @@ pub(crate) async fn serve(
                 if frame.msg_type == MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS =>
             {
                 last_template_id += 1;
-                on_constraints(&mut conn, &chain, frame, last_template_id).await?
+                on_constraints(
+                    &mut conn,
+                    &chain,
+                    frame,
+                    last_template_id,
+                    &mut current_prev,
+                )
+                .await?
             }
             Phase::AwaitingConstraints | Phase::Active => {
                 rbitcoin_log::info!("sv2: ignoring message {:#x}", frame.msg_type);
@@ -111,6 +121,7 @@ async fn on_constraints(
     chain: &Arc<ChainHub>,
     mut frame: Frame,
     template_id: u64,
+    current_prev: &mut Option<[u8; 32]>,
 ) -> io::Result<Next> {
     let Ok(c) = binary_sv2::from_bytes::<CoinbaseOutputConstraints>(&mut frame.payload) else {
         rbitcoin_log::info!("sv2: undecodable CoinbaseOutputConstraints");
@@ -120,16 +131,52 @@ async fn on_constraints(
         c.coinbase_output_max_additional_size,
         c.coinbase_output_max_additional_sigops,
     );
-    let chain = Arc::clone(chain);
-    let t = tokio::task::spawn_blocking(move || {
-        let _g = BlockingRegion::enter();
-        template::build(&chain, size, sigops)
-    })
-    .await
-    .map_err(io::Error::other)?;
+    let Some(t) = synced_template(chain, size, sigops).await? else {
+        return Ok(Next::Close);
+    };
+    // sv2-spec 07 §7.3: a template on a new prev hash is future, then activated.
+    let new_prev = *current_prev != Some(t.prev_hash);
     let msg = t
-        .to_message(template_id, true)
+        .to_message(template_id, new_prev)
         .map_err(|e| io::Error::other(format!("sv2 NewTemplate: {e:?}")))?;
     conn.send(MESSAGE_TYPE_NEW_TEMPLATE, msg).await?;
+    if new_prev {
+        conn.send(MESSAGE_TYPE_SET_NEW_PREV_HASH, t.to_prev_hash(template_id))
+            .await?;
+        *current_prev = Some(t.prev_hash);
+    }
     Ok(Next::Continue(Phase::Active))
+}
+
+/// No template while in IBD. Leaving IBD always comes with a new tip, so the
+/// gate rechecks on tip events. `None`: the tip channel closed (shutdown).
+async fn synced_template(
+    chain: &Arc<ChainHub>,
+    size: u32,
+    sigops: u16,
+) -> io::Result<Option<template::Template>> {
+    let mut tips = chain.subscribe_tips();
+    let mut logged = false;
+    loop {
+        let c = Arc::clone(chain);
+        let t = tokio::task::spawn_blocking(move || {
+            let _g = BlockingRegion::enter();
+            (!c.in_ibd())
+                .then(|| template::build(&c, size, sigops))
+                .transpose()
+        })
+        .await
+        .map_err(io::Error::other)??;
+        if t.is_some() {
+            return Ok(t);
+        }
+        if !logged {
+            rbitcoin_log::info!("sv2: holding templates until the node leaves IBD");
+            logged = true;
+        }
+        match tips.recv().await {
+            Ok(_) | Err(RecvError::Lagged(_)) => {}
+            Err(RecvError::Closed) => return Ok(None),
+        }
+    }
 }
