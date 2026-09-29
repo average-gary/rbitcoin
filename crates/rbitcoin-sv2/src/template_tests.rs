@@ -249,6 +249,118 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
     tp.shutdown().await;
 }
 
+/// A solution whose header misses the target is dropped before
+/// `accept_block`: it never claims the compact-block prefill slot. A
+/// solution that meets it still becomes the tip.
+#[tokio::test(flavor = "multi_thread")]
+async fn submit_solution_checks_pow_before_accept() {
+    use template_distribution_sv2::MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS;
+
+    let tc = padded_chain("sv2-pow-precheck", 0);
+    tc.chain.clock.set_mock(i64::from(tc.tip_time));
+    tc.chain.set_prefill_compact(true);
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    let t: NewTemplate = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_SET_NEW_PREV_HASH);
+    let p: SetNewPrevHash = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    let tip = tc.chain.tip_header().expect("tip").block_hash();
+
+    let coinbase = Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(t.coinbase_prefix.as_ref().to_vec()),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[[0u8; 32]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(t.coinbase_tx_value_remaining),
+                script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
+            },
+            bitcoin::consensus::deserialize(t.coinbase_tx_outputs.as_ref()).unwrap(),
+        ],
+    };
+    let path: Vec<[u8; 32]> = t
+        .merkle_path
+        .iter()
+        .map(|h| h.as_ref().try_into().expect("32-byte hash"))
+        .collect();
+    let root = fold_coinbase_path(coinbase.compute_txid().to_byte_array(), &path);
+    let mut header = bitcoin::block::Header {
+        version: bitcoin::block::Version::from_consensus(t.version as i32),
+        prev_blockhash: tip,
+        merkle_root: bitcoin::TxMerkleNode::from_byte_array(root),
+        time: p.header_timestamp,
+        bits: CompactTarget::from_consensus(p.n_bits),
+        nonce: 0,
+    };
+    let coinbase = serialize(&coinbase);
+
+    while header.validate_pow(header.target()).is_ok() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        t.template_id,
+        t.version,
+        header.time,
+        header.nonce,
+        &coinbase,
+    )
+    .await
+    .unwrap();
+    // Frames are handled in order: this reply follows the submit.
+    c.request_transaction_data(t.template_id).await.unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    assert_eq!(tc.chain.tip_header().unwrap().block_hash(), tip);
+    assert_eq!(
+        tc.chain.cmpct_prefill_indexes(&header.block_hash()),
+        None,
+        "a header that misses the target must not reach accept_block"
+    );
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(
+        t.template_id,
+        t.version,
+        header.time,
+        header.nonce,
+        &coinbase,
+    )
+    .await
+    .unwrap();
+    // The new tip's template follows the accept.
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    let solved = header.block_hash();
+    assert_eq!(tc.chain.tip_header().unwrap().block_hash(), solved);
+    assert_eq!(tc.chain.cmpct_prefill_indexes(&solved), Some(vec![0]));
+
+    tp.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
     let tc = padded_chain("sv2-template-tip-race", 1);

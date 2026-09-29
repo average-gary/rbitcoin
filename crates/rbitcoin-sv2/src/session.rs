@@ -14,7 +14,6 @@ use common_messages_sv2::{
 };
 use noise_sv2::Responder;
 use rbitcoin_net::{BlockingRegion, ChainHub};
-use rbitcoin_store::merkle_root_from_txids;
 use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
@@ -249,7 +248,7 @@ impl Session {
     }
 
     /// A bad solution is logged and dropped; a decodable one on a retained
-    /// template always goes to `ChainHub::accept_block`.
+    /// template that meets its target always goes to `ChainHub::accept_block`.
     async fn on_submit_solution(&mut self, mut frame: Frame) -> io::Result<()> {
         let Ok(m) = binary_sv2::from_bytes::<SubmitSolution>(&mut frame.payload) else {
             rbitcoin_log::info!("sv2: undecodable SubmitSolution");
@@ -278,24 +277,34 @@ impl Session {
             rbitcoin_log::info!("sv2: undecodable SubmitSolution coinbase");
             return Ok(());
         };
+        // CPU trade: the coinbase is leaf 0 (always the left child), so its
+        // txid folded over the template's path is the root the full txid
+        // list would give. A miss on the target costs one fold, not a clone
+        // and hash of every template tx plus ChainHub's connect path.
+        let root = rbitcoin_store::merkle_root_from_branch(
+            coinbase.compute_txid().to_byte_array(),
+            &r.t.merkle_path,
+            0,
+        );
+        let header = block::Header {
+            version: block::Version::from_consensus(m.version as i32),
+            prev_blockhash: BlockHash::from_byte_array(r.t.prev_hash),
+            merkle_root: TxMerkleNode::from_byte_array(root),
+            time: m.header_timestamp,
+            bits: CompactTarget::from_consensus(r.t.n_bits),
+            nonce: m.header_nonce,
+        };
+        if header.validate_pow(header.target()).is_err() {
+            rbitcoin_log::info!(
+                "sv2: SubmitSolution {} misses the template target",
+                header.block_hash()
+            );
+            return Ok(());
+        }
         let mut txdata = Vec::with_capacity(1 + r.t.txs.len());
         txdata.push(coinbase);
         txdata.extend(r.t.txs.iter().cloned());
-        let txids: Vec<[u8; 32]> = txdata
-            .iter()
-            .map(|tx| tx.compute_txid().to_byte_array())
-            .collect();
-        let block = Block {
-            header: block::Header {
-                version: block::Version::from_consensus(m.version as i32),
-                prev_blockhash: BlockHash::from_byte_array(r.t.prev_hash),
-                merkle_root: TxMerkleNode::from_byte_array(merkle_root_from_txids(&txids)),
-                time: m.header_timestamp,
-                bits: CompactTarget::from_consensus(r.t.n_bits),
-                nonce: m.header_nonce,
-            },
-            txdata,
-        };
+        let block = Block { header, txdata };
         let hash = block.block_hash();
         let c = Arc::clone(&self.chain);
         let outcome = tokio::task::spawn_blocking(move || {

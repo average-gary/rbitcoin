@@ -107,12 +107,19 @@ three unused subprotocol crates) if it adds nothing.
 - No templates before sync: same refusal gate as `getblocktemplate` during
   IBD.
 - `SubmitSolution` has no error message in TDP: undecodable or
-  unknown-template solutions are logged and dropped; decodable ones are
-  always attempted through `ChainHub::accept_block` (the TP MUST try to
+  unknown-template solutions are logged and dropped; decodable ones that
+  meet the target are always attempted through `ChainHub::accept_block` (the TP MUST try to
   broadcast work on its templates).
 - `SubmitSolution.header_timestamp` pre-check: ≥ the sent
   `SetNewPrevHash.header_timestamp` and ≤ that plus wall-clock elapsed
   (sv2-spec 07 §7.7).
+- `SubmitSolution` PoW pre-check: the session folds the coinbase txid over
+  the retained template's `merkle_path` (coinbase is leaf 0, always the
+  left child), builds the header, and drops the solution unless it meets
+  the template's `n_bits` target. Only then does it clone the template's
+  txs and call `ChainHub::accept_block`, so a spam of cheap bad-nonce
+  solutions never takes `connect_lock`, the compact-block prefill slot, or
+  the mempool.
 - OPERATOR / COMPAT / NixOS options land in the plan that ships the flag
   (same PR).
 
@@ -357,9 +364,11 @@ Ships the listener, bootstrap, tip push, transaction data, and
   session healthy.
 - **Green:** assembly + pre-checks in a blocking region; accept via
   ChainHub.
-- **Refactor:** assembly recomputes the root over `[coinbase, retained
-  txs…]` with the store's `merkle_root_from_txids` (the B2 selection
-  helper), not by folding the sent path.
+- **Refactor:** assembly folds the coinbase txid (leaf 0) over the
+  retained template's `merkle_path` with the store's
+  `merkle_root_from_branch` (the inverse of the B2 `merkle_branch`
+  helper), so a bad-PoW solution is dropped before the full txid list is
+  hashed; `accept_block` still checks the root.
 - **Verify:** journey filter.
 
 ### B8a — Authority secret from a file

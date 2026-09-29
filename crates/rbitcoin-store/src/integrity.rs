@@ -145,6 +145,21 @@ pub fn merkle_branch(leaves: &[[u8; 32]], mut index: usize) -> Vec<[u8; 32]> {
     branch
 }
 
+/// Root reached by folding `leaf` at `index` with its [`merkle_branch`]. The
+/// leaf is the left child when the index bit at that depth is 0.
+pub fn merkle_root_from_branch(leaf: [u8; 32], branch: &[[u8; 32]], index: usize) -> [u8; 32] {
+    branch
+        .iter()
+        .enumerate()
+        .fold(leaf, |acc, (depth, sibling)| {
+            if (index >> depth) & 1 == 0 {
+                hash256_concat(&acc, sibling)
+            } else {
+                hash256_concat(sibling, &acc)
+            }
+        })
+}
+
 // Bitcoin pairs an odd last node with itself.
 fn merkle_parent_level(mut level: Vec<[u8; 32]>) -> Vec<[u8; 32]> {
     if level.len() % 2 == 1 {
@@ -572,8 +587,9 @@ mod tests {
             let leaves: Vec<[u8; 32]> = (0..n).map(|i| [i + 10; 32]).collect();
             let root = merkle_root_from_txids(&leaves);
             for (index, leaf) in leaves.iter().enumerate() {
+                let branch = merkle_branch(&leaves, index);
                 let mut h = *leaf;
-                for (depth, sib) in merkle_branch(&leaves, index).iter().enumerate() {
+                for (depth, sib) in branch.iter().enumerate() {
                     h = if (index >> depth) & 1 == 0 {
                         hash256_concat(&h, sib)
                     } else {
@@ -581,6 +597,11 @@ mod tests {
                     };
                 }
                 assert_eq!(h, root, "n={n} index={index}");
+                assert_eq!(
+                    merkle_root_from_branch(*leaf, &branch, index),
+                    root,
+                    "n={n} index={index}"
+                );
             }
         }
     }
