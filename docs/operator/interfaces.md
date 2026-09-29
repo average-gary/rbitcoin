@@ -292,6 +292,11 @@ that misses the template target is logged and dropped. A `header_timestamp`
 outside the sv2 rolling window (a miner clock running ahead) is logged and
 still submitted; block validation applies the consensus time rules.
 
+There is no client authentication. Noise NX proves the TP's authority key
+to the client, not the client to the TP, so anyone who can reach the port
+can request templates and submit solutions. Bind to loopback (the NixOS
+module default) or firewall the port to the JDC host.
+
 ```bash
 openssl rand -hex 32 > ./datadir-regtest/sv2-authority.key
 ./target/release/rbitcoin-node \
