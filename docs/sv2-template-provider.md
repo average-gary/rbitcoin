@@ -9,7 +9,7 @@ previous slice is committed.
 | Plan | Outcome | Ships flags |
 |------|---------|-------------|
 | **A** | Landed. GBT and `generate` build from `MempoolHub::select_block_template` | none |
-| **B** | A Job Declarator Client mines a block through the node's TP | `--sv2-tp-listen`, `--sv2-tp-authority-sec`, `--sv2-tp-cert-validity`, `--sv2-tp-stale-grace` |
+| **B** | A Job Declarator Client mines a block through the node's TP | `--sv2-tp-listen`, `--sv2-tp-authority-sec` / `--sv2-tp-authority-sec-file`, `--sv2-tp-cert-validity`, `--sv2-tp-stale-grace` |
 | **C** | Templates refresh on fee gain with the tip unchanged | `--sv2-tp-fee-delta`, `--sv2-tp-template-interval` |
 
 B is not split further: a listener that serves templates without

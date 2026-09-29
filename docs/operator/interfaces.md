@@ -257,6 +257,49 @@ must import `pools-v2.json` or every block is **Unknown**: `npm run start
 hundreds when that worked. Predicted blocks wait on Node’s first mempool
 sync + rust-gbt; they are empty until `/internal/mempool/txs` has filled.
 
+## Stratum v2 Template Provider
+
+`--sv2-tp-listen ADDR` serves the SV2 Template Distribution Protocol (TDP v2)
+over Noise NX. A Job Declarator Client or pool connects, sends
+`CoinbaseOutputConstraints`, and gets `NewTemplate` / `SetNewPrevHash` on
+every tip. It can request a template's transactions and submit a solved
+block, which the node validates and connects like any other block. Default
+is **off**; there is no plaintext mode.
+
+| Flag (conf key) | Default | Meaning |
+|---|---|---|
+| `--sv2-tp-listen ADDR` (`sv2_tp_listen`) | off | TCP bind for TDP clients |
+| `--sv2-tp-authority-sec-file PATH` (`sv2_tp_authority_sec_file`) | — | File holding the 64-hex secp256k1 authority secret |
+| `--sv2-tp-authority-sec HEX` (`sv2_tp_authority_sec`) | — | The same secret inline. Argv shows in `ps`; prefer the file or the conf file |
+| `--sv2-tp-cert-validity SECS` (`sv2_tp_cert_validity`) | 3600 | Lifetime of each per-connection Noise certificate |
+| `--sv2-tp-stale-grace SECS` (`sv2_tp_stale_grace`) | 10 | How long templates on a replaced tip still answer; `0` retires them at once |
+
+`--sv2-tp-listen` needs one of the authority flags. At startup the node logs
+`sv2 TP on ADDR (authority x-only pubkey HEX)`; configure that key as the
+TP authority in the client. No templates are sent while the node is in IBD.
+Each session keeps its last 3 templates. A request for an older template id
+answers `stale-template-id`, and an undecodable or out-of-window
+`SubmitSolution` is logged and dropped.
+
+```bash
+openssl rand -hex 32 > ./datadir-regtest/sv2-authority.key
+./target/release/rbitcoin-node \
+  --datadir ./datadir-regtest --network regtest \
+  --sv2-tp-listen 127.0.0.1:18447 \
+  --sv2-tp-authority-sec-file ./datadir-regtest/sv2-authority.key
+```
+
+NixOS takes only a runtime path for the key, so it never enters the store:
+
+```nix
+services.rbitcoin.sv2.tp = {
+  enable = true;                       # --sv2-tp-listen address:port
+  port = 8442;                         # default; address = "127.0.0.1"
+  authoritySecretFile = "/run/keys/sv2-authority"; # readable by the service user
+  # certValidity = 3600; staleGrace = 10; openFirewall = false;
+};
+```
+
 ## Core-class JSON-RPC
 
 Optional HTTP JSON-RPC subset (default **off**). `--rpc` binds
