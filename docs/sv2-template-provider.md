@@ -181,13 +181,16 @@ Ships the listener, bootstrap, tip push, transaction data, and
   in-crate test initiator; success, bad-flags, bad-protocol, and
   (cap + 1)th-connection cases.
 - **Green:** `crates/rbitcoin-sv2` (workspace member) with the wire crates
-  pinned to the Step 0 set; authority-keypair config, listener task,
+  pinned to the Step 0 set minus `parsers_sv2` (known TDP / common types
+  decode with `binary_sv2::from_bytes`); authority-keypair config, listener task,
   per-connection session task driving the `codec_sv2` handshake then the
   common-message branch; session-cap semaphore on accept. Add the
   `rbitcoin-sv2` row to [`CRATES.md`](./CRATES.md) in this commit
   ([`README.md`](./README.md) rule: row with the new file).
-- **Refactor:** session state as an enum (`Handshake`,
-  `AwaitingConstraints`, `Active`), not nested ifs.
+- **Refactor:** session state as an enum (`AwaitingSetup`,
+  `AwaitingConstraints`, later `Active`), not nested ifs. The Noise
+  handshake is a typed prologue (`codec_sv2::Handshake` consumes its
+  state), not a phase.
 - **Verify:** `cargo test -p rbitcoin-sv2 setup_`
 
 ### B2 — Merkle path helper in consensus

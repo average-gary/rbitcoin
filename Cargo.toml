@@ -11,6 +11,7 @@ members = [
     "crates/rbitcoin-rpc",
     "crates/rbitcoin-electrum",
     "crates/rbitcoin-esplora",
+    "crates/rbitcoin-sv2",
     "crates/rbitcoin-cli",
     "crates/rbitcoin-node",
     "crates/rbitcoin-test",
@@ -37,6 +38,7 @@ rbitcoin-net = { path = "crates/rbitcoin-net" }
 rbitcoin-rpc = { path = "crates/rbitcoin-rpc" }
 rbitcoin-electrum = { path = "crates/rbitcoin-electrum" }
 rbitcoin-esplora = { path = "crates/rbitcoin-esplora" }
+rbitcoin-sv2 = { path = "crates/rbitcoin-sv2" }
 rbitcoin-cli = { path = "crates/rbitcoin-cli" }
 rbitcoin-node = { path = "crates/rbitcoin-node" }
 rbitcoin-test = { path = "crates/rbitcoin-test" }

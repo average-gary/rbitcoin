@@ -1,0 +1,23 @@
+[package]
+name = "rbitcoin-sv2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Stratum v2 Template Distribution Protocol server (Noise over TCP)"
+
+[dependencies]
+rbitcoin-log = { workspace = true }
+bitcoin = { workspace = true }
+tokio = { workspace = true }
+# Stratum v2 wire crates, pinned to the Step 0 spike set
+# (docs/sv2-template-provider.md). Messages decode with `binary_sv2::from_bytes`
+# on the known types; `parsers_sv2` is not needed.
+noise_sv2 = "=2.0.0"
+codec_sv2 = { version = "=7.0.0", features = ["noise_sv2"] }
+binary_sv2 = "=7.0.0"
+common_messages_sv2 = "=9.0.0"
+
+[lints]
+workspace = true
