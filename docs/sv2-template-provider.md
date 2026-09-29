@@ -193,19 +193,26 @@ Ships the listener, bootstrap, tip push, transaction data, and
   state), not a phase.
 - **Verify:** `cargo test -p rbitcoin-sv2 setup_`
 
-### B2 — Merkle path helper in consensus
+### B2 — Merkle path helper next to the root
 
-- **Contract:** `coinbase_merkle_path(txids)` returns the leftmost-branch
-  hashes deepest-first; folding them with the coinbase txid reproduces
-  `merkle_root_bytes` for the same list. Edge cases: single tx (empty
-  path), odd counts at every level.
-- **Red:** `cargo test -p rbitcoin-consensus merkle_path_` — small known
-  vectors.
-- **Green:** helper next to `merkle_root_bytes`
-  (`crates/rbitcoin-consensus/src/block/mod.rs`).
-- **Refactor:** share the level-pairing loop with the root computation if
-  it dedupes without obscuring.
-- **Verify:** `cargo test -p rbitcoin-consensus merkle_path_`
+- **Contract:** `merkle_branch(leaves, index)` returns the sibling hashes
+  from `leaves[index]` to the root, deepest-first; folding them with the
+  leaf reproduces `merkle_root_from_txids` for the same list. The coinbase
+  path is `index = 0` (the leaf's own value feeds no entry, so the builder
+  passes a placeholder). Edge cases: single tx (empty path), odd counts at
+  every level.
+- **Red:** `cargo test -p rbitcoin-store --lib merkle_path_` — small known
+  vectors plus a fold at every index for 1..=9 leaves (pure arithmetic, no
+  session reaches it before B3).
+- **Green:** helper next to `merkle_root_from_txids`
+  (`crates/rbitcoin-store/src/integrity.rs`). The root's owner is the store
+  (consensus `merkle_root_bytes` only wraps it), and
+  `rbitcoin-query` `merkle_proof` (Electrum `get_merkle`, Esplora
+  `merkle-proof`) had its own inline branch loop; one owner for both.
+- **Refactor:** root and branch share one level-pairing step;
+  `Query::merkle_proof` calls `merkle_branch`.
+- **Verify:** `cargo test -p rbitcoin-store --lib merkle_`, Electrum /
+  Esplora merkle journeys
 
 ### B3 — Template builder with TDP coinbase
 
@@ -214,7 +221,7 @@ Ships the listener, bootstrap, tip push, transaction data, and
   ([Constraints](#constraints-all-plans)); `coinbase_prefix` is the BIP34
   height push; `value_remaining` = subsidy + Σ selected fees (from the
   selection, not a re-read); outputs = witness commitment last;
-  `merkle_path` from B2; the record carries the serialized non-coinbase
+  `merkle_path` from B2's `merkle_branch`; the record carries the serialized non-coinbase
   txs in selection order.
 - **Red:** `cargo test -p rbitcoin-sv2 template_` — synthetic mempool
   (reuse `rbitcoin-mempool` accept fixtures): weight bound at the reserved
@@ -344,7 +351,7 @@ when fees rise enough to matter, throttled. Requires Plan B.
 
 ## Test budget
 
-Units in `rbitcoin-mempool` (budgeted selection), `rbitcoin-consensus`
+Units in `rbitcoin-mempool` (budgeted selection), `rbitcoin-store`
 (merkle path), and `rbitcoin-sv2` (builder, throttle, gate). **One**
 regtest integration journey in `rbitcoin-test`, opened in B4 and extended
 by B5–B7 and C1 — one node open, per [`TESTING.md`](../TESTING.md) budgets.
