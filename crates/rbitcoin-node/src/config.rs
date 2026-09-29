@@ -627,7 +627,8 @@ impl NodeConfig {
         }
         if self.sv2_tp_listen.is_some() && self.sv2_tp_authority_sec.is_none() {
             return Err(NodeError::Config(
-                "--sv2-tp-listen requires --sv2-tp-authority-sec".into(),
+                "--sv2-tp-listen requires --sv2-tp-authority-sec or --sv2-tp-authority-sec-file"
+                    .into(),
             ));
         }
         self.validate_only_net()?;
@@ -1089,15 +1090,14 @@ impl NodeConfig {
                 );
             }
             "sv2_tp_authority_sec" => {
-                let sec = <[u8; 32]>::from_hex(val)
-                    .ok()
-                    .filter(|k| bitcoin::secp256k1::SecretKey::from_slice(k).is_ok())
-                    .ok_or_else(|| {
-                        NodeError::Config(
-                            "conf sv2_tp_authority_sec: want a 64-hex secp256k1 secret key".into(),
-                        )
-                    })?;
-                self.sv2_tp_authority_sec = Some(sec);
+                self.sv2_tp_authority_sec = Some(parse_authority_sec(&key_l, val)?);
+            }
+            // Keeps the secret out of argv and the unit file.
+            "sv2_tp_authority_sec_file" => {
+                let hex = std::fs::read_to_string(val).map_err(|e| {
+                    NodeError::Config(format!("conf sv2_tp_authority_sec_file {val}: {e}"))
+                })?;
+                self.sv2_tp_authority_sec = Some(parse_authority_sec(&key_l, hex.trim())?);
             }
             "sv2_tp_stale_grace" => {
                 self.sv2_tp_stale_grace_secs = val
@@ -1450,6 +1450,14 @@ fn is_conf_true(val: &str) -> bool {
 }
 
 /// Parse `1`/`true`/`yes`/`on` → true; `0`/`false`/`no`/`off` → false.
+/// The error never echoes `val`: it is a secret.
+fn parse_authority_sec(key: &str, val: &str) -> Result<[u8; 32], NodeError> {
+    <[u8; 32]>::from_hex(val)
+        .ok()
+        .filter(|k| bitcoin::secp256k1::SecretKey::from_slice(k).is_ok())
+        .ok_or_else(|| NodeError::Config(format!("conf {key}: want a 64-hex secp256k1 secret key")))
+}
+
 fn parse_conf_bool(val: &str) -> Result<bool, String> {
     let v = val.to_ascii_lowercase();
     match v.as_str() {
@@ -1632,6 +1640,34 @@ mod tests {
         ] {
             let e = format!("{}", c.apply_kv(k, v).unwrap_err());
             assert!(e.contains(k), "garbage must name the knob: {e}");
+        }
+    }
+
+    #[test]
+    fn sv2_tp_authority_sec_file_reads_the_key_off_argv() {
+        let dir = tmp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut c = NodeConfig::default().with_datadir(dir.clone());
+        let key = dir.join("sv2-authority.key");
+        std::fs::write(&key, format!("{}\n", "07".repeat(32))).unwrap();
+        let path = key.to_str().unwrap();
+        assert_eq!(
+            c.apply_kv("sv2_tp_authority_sec_file", path).unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(c.sv2_tp_authority_sec, Some([7; 32]));
+
+        let bad = dir.join("sv2-bad.key");
+        std::fs::write(&bad, "00".repeat(32)).unwrap();
+        let missing = dir.join("sv2-missing.key");
+        for p in [&bad, &missing] {
+            let e = format!(
+                "{}",
+                c.apply_kv("sv2_tp_authority_sec_file", p.to_str().unwrap())
+                    .unwrap_err()
+            );
+            assert!(e.contains("sv2_tp_authority_sec_file"), "{e}");
+            assert!(!e.contains(&"00".repeat(32)), "never echo the key: {e}");
         }
     }
 

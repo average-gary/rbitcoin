@@ -336,15 +336,30 @@ Ships the listener, bootstrap, tip push, transaction data, and
   helper), not by folding the sent path.
 - **Verify:** journey filter.
 
-### B8 — Operator surface
+### B8a — Authority secret from a file
+
+- **Contract:** `--sv2-tp-authority-sec-file PATH` (conf
+  `sv2_tp_authority_sec_file`) reads the same 64-hex secret from a file at
+  parse time. A hex value in argv shows in `ps` and in a NixOS unit in the
+  world-readable store; the file keeps it out of both. Errors name the knob
+  and never echo the key.
+- **Red:** node lib test: a key file sets the secret; a bad key and a
+  missing file fail without echoing it.
+- **Green:** the key shares the hex + `SecretKey` check with
+  `sv2_tp_authority_sec`.
+- **Verify:** `cargo test -p rbitcoin-node --lib sv2_tp`
+
+### B8b — Operator surface
 
 - **Contract:** [`OPERATOR.md`](../OPERATOR.md) documents
-  `--sv2-tp-listen`, `--sv2-tp-authority-sec`, `--sv2-tp-cert-validity`,
+  `--sv2-tp-listen`, `--sv2-tp-authority-sec`,
+  `--sv2-tp-authority-sec-file`, `--sv2-tp-cert-validity`,
   `--sv2-tp-stale-grace`. [`COMPAT.md`](../COMPAT.md) gains the SV2 TDP
   row (the "no stratum" row stays; that row is v1 stratum/pool).
   First-class `services.rbitcoin.sv2.tp.*` options in
   [`nix/modules/rbitcoin.nix`](../nix/modules/rbitcoin.nix) with argv
-  asserts in `nixos-module-eval.nix`.
+  asserts in `nixos-module-eval.nix`. The module takes only
+  `authoritySecretFile` (a runtime path), never the hex.
 - **Red:** eval assert for the flags; docs need no test.
 - **Green:** options + docs.
 - **Refactor:** `extraArgs` still appends last.
@@ -379,7 +394,7 @@ when fees rise enough to matter, throttled. Requires Plan B.
 - **Contract:** OPERATOR documents `--sv2-tp-fee-delta` and
   `--sv2-tp-template-interval`; `services.rbitcoin.sv2.tp.*` gains both
   with argv asserts.
-- **Red / Green / Refactor / Verify:** as B8.
+- **Red / Green / Refactor / Verify:** as B8b.
 
 ---
 
