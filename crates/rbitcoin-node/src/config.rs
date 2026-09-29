@@ -1111,15 +1111,24 @@ impl NodeConfig {
                 self.sv2_tp_authority_sec = Some(parse_authority_sec(&key_l, hex.trim())?);
             }
             "sv2_tp_stale_grace" => {
-                self.sv2_tp_stale_grace_secs = val
-                    .parse()
-                    .map_err(|e| NodeError::Config(format!("conf sv2_tp_stale_grace: {e}")))?;
+                let max = rbitcoin_sv2::MAX_STALE_GRACE.as_secs();
+                self.sv2_tp_stale_grace_secs =
+                    val.parse().ok().filter(|&s| s <= max).ok_or_else(|| {
+                        NodeError::Config(format!("conf sv2_tp_stale_grace: want seconds <= {max}"))
+                    })?;
             }
             "sv2_tp_cert_validity" => {
-                self.sv2_tp_cert_validity_secs =
-                    val.parse().ok().filter(|&s| s > 0).ok_or_else(|| {
-                        NodeError::Config("conf sv2_tp_cert_validity: want seconds > 0".into())
-                    })?;
+                self.sv2_tp_cert_validity_secs = val
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|&s| s > 0)
+                    .ok_or_else(|| {
+                        NodeError::Config(format!(
+                            "conf sv2_tp_cert_validity: want seconds in 1..={}",
+                            u32::MAX
+                        ))
+                    })?
+                    .into();
             }
             "rpc" => {
                 self.rpc.socket = parse_conf_bool(val)
@@ -1655,6 +1664,8 @@ mod tests {
             ("sv2_tp_authority_sec", not_hex.as_str()),
             ("sv2_tp_cert_validity", "0"),
             ("sv2_tp_stale_grace", "-1"),
+            ("sv2_tp_stale_grace", "86401"),
+            ("sv2_tp_cert_validity", "4294967296"),
         ] {
             let e = format!("{}", c.apply_kv(k, v).unwrap_err());
             assert!(e.contains(k), "garbage must name the knob: {e}");

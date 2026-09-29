@@ -333,7 +333,10 @@ Ships the listener, bootstrap, tip push, transaction data, and
   During `--sv2-tp-stale-grace` the old template still answers
   `RequestTransactionData`; after the grace it answers
   `"stale-template-id"`. Future templates for the old prev hash retire the
-  same way. `ChainHub::connect_at` moves the store tip before it strips the
+  same way. `--sv2-tp-stale-grace` is at most 86400 s
+  (`MAX_STALE_GRACE`) and `--sv2-tp-cert-validity` at most `u32::MAX` s
+  (the Noise cert field); config parse and `run_sv2_tp` both refuse
+  larger values. `ChainHub::connect_at` moves the store tip before it strips the
   block's txs from the mempool and sends the tip event, so a build in that
   window (constraints, or the previous event's rebuild on back-to-back
   blocks) can land on the new prev hash with confirmed txs. A failed

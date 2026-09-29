@@ -447,13 +447,13 @@ in
       };
 
       certValidity = mkOption {
-        type = types.ints.positive;
+        type = types.ints.between 1 4294967295;
         default = 3600;
         description = "Seconds each per-connection Noise certificate is valid.";
       };
 
       staleGrace = mkOption {
-        type = types.ints.unsigned;
+        type = types.ints.between 0 86400;
         default = 10;
         description = "Seconds a replaced tip's templates still answer RequestTransactionData and SubmitSolution.";
       };

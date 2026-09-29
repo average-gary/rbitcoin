@@ -271,8 +271,8 @@ is **off**; there is no plaintext mode.
 | `--sv2-tp-listen ADDR` (`sv2_tp_listen`) | off | TCP bind for TDP clients |
 | `--sv2-tp-authority-sec-file PATH` (`sv2_tp_authority_sec_file`) | — | File holding the secp256k1 authority secret: 64 hex, or the SRI `key-utils` base58check form |
 | `--sv2-tp-authority-sec KEY` (`sv2_tp_authority_sec`) | — | The same secret inline. Argv shows in `ps`; prefer the file or the conf file |
-| `--sv2-tp-cert-validity SECS` (`sv2_tp_cert_validity`) | 3600 | Lifetime of each per-connection Noise certificate |
-| `--sv2-tp-stale-grace SECS` (`sv2_tp_stale_grace`) | 10 | How long templates on a replaced tip still answer; `0` retires them at once |
+| `--sv2-tp-cert-validity SECS` (`sv2_tp_cert_validity`) | 3600 | Lifetime of each per-connection Noise certificate; 1 to 4294967295 (`u32::MAX`, the Noise cert field) |
+| `--sv2-tp-stale-grace SECS` (`sv2_tp_stale_grace`) | 10 | How long templates on a replaced tip still answer; 0 to 86400 (one day), `0` retires them at once |
 
 `--sv2-tp-listen` needs one of the authority flags. At startup the node logs
 `sv2 TP on ADDR (authority pubkey KEY)`. KEY is in the SRI `key-utils`

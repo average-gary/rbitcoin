@@ -32,6 +32,10 @@ pub const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default [`Sv2TpConfig::write_timeout`].
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Upper bound on [`Sv2TpConfig::stale_grace`]; the grace deadline is
+/// `Instant + stale_grace`, which panics on overflow.
+pub const MAX_STALE_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
+
 pub struct Sv2TpConfig {
     pub listen: SocketAddr,
     /// Tip, params, and the attached mempool the templates are built from.
@@ -84,6 +88,19 @@ impl Sv2TpHandle {
 /// At [`MAX_SESSIONS`] the next connection is closed before the handshake;
 /// existing sessions are not touched.
 pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
+    // noise_sv2 casts `cert_validity.as_secs()` to u32; a larger value wraps.
+    if u32::try_from(config.cert_validity.as_secs()).is_err() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sv2 cert_validity: over u32::MAX seconds",
+        ));
+    }
+    if config.stale_grace > MAX_STALE_GRACE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("sv2 stale_grace: over {}s", MAX_STALE_GRACE.as_secs()),
+        ));
+    }
     let keypair =
         Keypair::from_seckey_slice(&Secp256k1::new(), &config.authority_secret).map_err(|e| {
             io::Error::new(

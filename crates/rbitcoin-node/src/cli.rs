@@ -360,8 +360,8 @@ Health: --health-listen [ADDR] serves GET /healthz from the first second of star
 SV2: --sv2-tp-listen ADDR serves the Stratum v2 Template Distribution Protocol (Noise over TCP; default off).\n\
   Requires --sv2-tp-authority-sec KEY (secp256k1 secret, 64 hex or key-utils base58check; argv exposes it) or --sv2-tp-authority-sec-file PATH\n\
   (the same hex in a file). The x-only pubkey is logged.\n\
-  --sv2-tp-cert-validity SECS per-connection certificate lifetime (default 3600).\n\
-  --sv2-tp-stale-grace SECS keeps a replaced tip's templates answering for SECS (default 10).\n\
+  --sv2-tp-cert-validity SECS per-connection certificate lifetime, at most 4294967295 (default 3600).\n\
+  --sv2-tp-stale-grace SECS keeps a replaced tip's templates answering for SECS, at most 86400 (default 10).\n\
 RPC: --rpc unix socket {{datadir}}/rpc.sock; --rpc-listen [ADDR] adds TCP (default 127.0.0.1 and Core-matching port). Token {{datadir}}/rpc.token (Bearer); --rpc-cookie-file opts TCP into Core cookie HTTP Basic. No --rpcuser.\n\
 Cold files: --datadir-cold PATH puts Class A seqsigwit.body/idx under PATH/store (HDD).\n\
   Default (flag omitted): hot and cold files both live under --datadir.\n\

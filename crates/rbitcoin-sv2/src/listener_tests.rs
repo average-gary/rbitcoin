@@ -1,6 +1,6 @@
 use crate::test_chain::padded_chain;
 use crate::testutil::TpClient;
-use crate::{run_sv2_tp, Sv2TpConfig, MAX_SESSIONS, SETUP_TIMEOUT, WRITE_TIMEOUT};
+use crate::{run_sv2_tp, Sv2TpConfig, MAX_SESSIONS, MAX_STALE_GRACE, SETUP_TIMEOUT, WRITE_TIMEOUT};
 use common_messages_sv2::{
     SetupConnectionError, SetupConnectionSuccess, MESSAGE_TYPE_SETUP_CONNECTION_ERROR,
     MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
@@ -307,4 +307,30 @@ async fn oversized_client_frame_closes_the_session() {
         closed.map(|r| r.map(|f| f.msg_type))
     );
     tp.shutdown().await;
+}
+
+#[tokio::test]
+async fn out_of_range_cert_validity_or_stale_grace_refuses_to_start() {
+    let tc = padded_chain("sv2-listener-range", 0);
+    for (cert_validity, stale_grace) in [
+        (Duration::from_secs(u64::from(u32::MAX) + 1), Duration::ZERO),
+        (
+            Duration::from_secs(3600),
+            MAX_STALE_GRACE + Duration::from_secs(1),
+        ),
+    ] {
+        let e = run_sv2_tp(Sv2TpConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            chain: tc.chain.clone(),
+            authority_secret: [7; 32],
+            cert_validity,
+            stale_grace,
+            setup_timeout: SETUP_TIMEOUT,
+            write_timeout: WRITE_TIMEOUT,
+        })
+        .await
+        .err()
+        .expect("out-of-range config must not start");
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{e}");
+    }
 }
