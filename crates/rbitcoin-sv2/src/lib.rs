@@ -23,10 +23,10 @@ pub use transport::Frame;
 /// Concurrent TDP sessions. RAM trade (CONTRIBUTING 9): each session retains
 /// the witness-serialized txs of its live templates (≤ ~4 MB × ~3), so the
 /// cap bounds retention at ≤ ~96 MB.
-pub const MAX_SESSIONS: usize = 8;
+pub(crate) const MAX_SESSIONS: usize = 8;
 
 /// Default [`Sv2TpConfig::setup_timeout`]. A session holds a slot from TCP
-/// accept, so without it [`MAX_SESSIONS`] silent sockets lock clients out.
+/// accept, so without it `MAX_SESSIONS` silent sockets lock clients out.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Default [`Sv2TpConfig::write_timeout`].
@@ -59,14 +59,15 @@ pub struct Sv2TpConfig {
 pub struct Sv2TpHandle {
     pub local_addr: SocketAddr,
     /// X-only authority public key the clients verify the certificate against.
-    pub authority_pubkey: [u8; 32],
+    pub(crate) authority_pubkey: [u8; 32],
     task: JoinHandle<()>,
     sessions: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl Sv2TpHandle {
-    /// `authority_pubkey` as SRI `key-utils` prints it (the form JDC and pool
-    /// configs take): base58check of version `1u16` LE, then the x-only key.
+    /// The authority public key as SRI `key-utils` prints it (the form JDC
+    /// and pool configs take): base58check of version `1u16` LE, then the
+    /// x-only key.
     pub fn authority_key(&self) -> String {
         let mut v = [0u8; 34];
         v[..2].copy_from_slice(&1u16.to_le_bytes());
@@ -85,7 +86,7 @@ impl Sv2TpHandle {
 
 /// Bind the listener and serve TDP sessions until [`Sv2TpHandle::shutdown`].
 ///
-/// At [`MAX_SESSIONS`] the next connection is closed before the handshake;
+/// At `MAX_SESSIONS` the next connection is closed before the handshake;
 /// existing sessions are not touched.
 pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     // noise_sv2 casts `cert_validity.as_secs()` to u32; a larger value wraps.
