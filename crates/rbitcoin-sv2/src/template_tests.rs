@@ -9,8 +9,8 @@ use bitcoin::{
 };
 use bitcoin::{CompactTarget, Target};
 use rbitcoin_consensus::{
-    bip34_height_script, block_subsidy, expected_next_bits, median_time_past, mine_empty_regtest,
-    witness_commitment_script,
+    bip34_height_script, block_subsidy, confirm_scripts_phase, expected_next_bits,
+    median_time_past, mine_empty_regtest, mine_regtest_paying, witness_commitment_script,
 };
 use rbitcoin_primitives::Height;
 use rbitcoin_store::merkle_root_from_txids;
@@ -245,6 +245,55 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
             .expect("message")
     };
     check_template(&mut c, &tc, first, &[], true).await;
+
+    tp.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
+    let tc = padded_chain("sv2-template-tip-race", 1);
+    tc.chain.clock.set_mock(i64::from(tc.tip_time));
+    let paid = spend(
+        tc.coinbases[0],
+        10_000,
+        ScriptBuf::from_bytes(vec![OP_TRUE]),
+    );
+    tc.mempool.accept_tx(&paid).expect("mempool accept");
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    c.recv().await.expect("setup reply");
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    expect_template(&mut c, &tc, &[&paid], true).await;
+
+    // One write batch moves the store tip to y, then sends x's event, then
+    // y's: the rebuild for x already sits on y's hash when y's event lands.
+    let tip = tc.chain.tip_header().expect("tip").block_hash();
+    let h = tc.chain.query.tip_height().expect("tip height").0;
+    let script = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let x = mine_regtest_paying(tip, tc.tip_time + 1, h + 1, script, vec![paid.clone()]);
+    let y = mine_empty_regtest(x.block_hash(), tc.tip_time + 2, h + 2);
+    let loaded = tc
+        .chain
+        .confirm_wire_load_phase(&[(Height(h + 1), x), (Height(h + 2), y)])
+        .expect("load")
+        .expect("contiguous");
+    let scripted = confirm_scripts_phase(loaded.batch).expect("scripts");
+    tc.chain.confirm_write(scripted.batch).expect("write");
+
+    let on_y = expect_template(&mut c, &tc, &[], true).await;
+    let rebuilt = expect_template(&mut c, &tc, &[], false).await;
+    assert!(rebuilt > on_y, "y's event must rebuild the template on y");
 
     tp.shutdown().await;
 }

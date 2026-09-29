@@ -49,6 +49,8 @@ struct Templates {
     current_prev: Option<[u8; 32]>,
     /// `SetNewPrevHash.header_timestamp` sent for `current_prev`, and when.
     prev_sent: Option<(u32, Instant)>,
+    /// A template was built since the last tip event.
+    built_since_tip: bool,
     retained: VecDeque<Retained>,
 }
 
@@ -71,6 +73,15 @@ impl Templates {
             prev_sent,
             retire_at: None,
         });
+    }
+
+    /// Whether a tip event needs a rebuild: a new prev hash, or any build
+    /// since the last event.
+    fn on_tip(&mut self, hash: [u8; 32]) -> bool {
+        // ChainHub publishes the store tip (connect or rollback reconnect),
+        // then strips the block's txs from the mempool, then sends the event:
+        // a build in between can select txs the block confirmed.
+        std::mem::take(&mut self.built_since_tip) || self.current_prev != Some(hash)
     }
 
     fn get(&self, id: u64) -> Option<&Retained> {
@@ -152,7 +163,7 @@ impl Session {
                     }
                 }
                 tip = tips.recv() => match tip {
-                    Ok(ev) if self.templates.current_prev == Some(ev.hash.to_byte_array()) => {}
+                    Ok(ev) if !self.templates.on_tip(ev.hash.to_byte_array()) => {}
                     Ok(_) | Err(RecvError::Lagged(_)) => self.publish().await?,
                     Err(RecvError::Closed) => return Ok(()),
                 },
@@ -219,6 +230,7 @@ impl Session {
             .to_message(template_id, new_prev)
             .map_err(|e| io::Error::other(format!("sv2 NewTemplate: {e:?}")))?;
         self.conn.send(MESSAGE_TYPE_NEW_TEMPLATE, msg).await?;
+        self.templates.built_since_tip = true;
         if new_prev {
             self.conn
                 .send(MESSAGE_TYPE_SET_NEW_PREV_HASH, t.to_prev_hash(template_id))
@@ -392,4 +404,28 @@ async fn on_request_transaction_data(
     };
     conn.send(MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS, reply)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Templates;
+
+    #[test]
+    fn tip_event_rebuilds_a_template_built_before_it() {
+        let (old, new) = ([1; 32], [2; 32]);
+        let mut t = Templates::default();
+        assert!(t.on_tip(old), "first tip");
+        t.current_prev = Some(old);
+        assert!(!t.on_tip(old), "repeat event with no build since");
+        // A build between the store tip move and its event (constraints, or
+        // the previous event's rebuild) already sits on the new prev hash.
+        t.current_prev = Some(new);
+        t.built_since_tip = true;
+        assert!(t.on_tip(new), "template may hold the block's confirmed txs");
+        assert!(!t.on_tip(new), "no build since the event");
+        // A failed reorg disconnects `new` without an event, then its rollback
+        // reconnects `new`; a build in that window precedes the second event.
+        t.built_since_tip = true;
+        assert!(t.on_tip(new), "reconnect of the same hash after a build");
+    }
 }

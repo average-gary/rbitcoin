@@ -304,7 +304,28 @@ Ships the listener, bootstrap, tip push, transaction data, and
   During `--sv2-tp-stale-grace` the old template still answers
   `RequestTransactionData`; after the grace it answers
   `"stale-template-id"`. Future templates for the old prev hash retire the
-  same way.
+  same way. `ChainHub::connect_at` moves the store tip before it strips the
+  block's txs from the mempool and sends the tip event, so a build in that
+  window (constraints, or the previous event's rebuild on back-to-back
+  blocks) can land on the new prev hash with confirmed txs. A failed
+  reorg's rollback reconnects the same hash the same way. The session
+  flags every build and each tip event clears the flag: an event for the
+  current prev hash rebuilds iff a template was built since the last
+  event, sent as `future_template: false` with no `SetNewPrevHash`. A
+  repeat event with no build between is skipped.
+  Future consideration: stripping the mempool before publishing the store
+  tip, or publishing both atomically, would close the window for every
+  template consumer, and `built_since_tip` could then go. GBT
+  (`getblocktemplate`) and Esplora `GET /block-template` read the store tip
+  and then select from the mempool with no tie to `connect_lock`, so a call
+  in the window has the same stale selection. The change reorders the store
+  publish against the mempool on the tip-accept hot path and needs `ibd:
+  perf` timers. Admission is not serialized with connect: `accept_tx` takes
+  neither `connect_lock` nor the tip-accept thread. It prepares against the
+  store tip under the mempool read lock and commits under the write lock
+  without re-reading the tip. A tx prepared against the old tip in the gap
+  between strip and publish could then re-admit a confirmed tx unless
+  admission is serialized with connect.
 - **Red:** journey: generate a block via the harness RPC, assert the push
   pair arrives without client polling; stale-id behavior before and after
   the grace (the harness sets it small).
@@ -315,7 +336,12 @@ Ships the listener, bootstrap, tip push, transaction data, and
   frames, tip events, and the grace deadline; frames come from a reader
   task because a Noise `recv` is not cancel-safe.
 - **Verify:** journey filter; `cargo test -p rbitcoin-sv2 --lib` (the sync
-  gate unit now clears on the tip event)
+  gate unit now clears on the tip event; the
+  `tip_event_rebuilds_a_template_built_on_its_prev_hash` journey writes a
+  two-block batch through `confirm_write`, so the rebuild for the first
+  event already sits on the second block's hash; the
+  `tip_event_rebuilds_a_template_built_before_it` unit pins the rollback
+  reconnect, which no session hits deterministically)
 
 ### B7 — SubmitSolution → accept_block
 
