@@ -176,6 +176,7 @@ async fn template_budget_fees_coinbase_and_merkle_path() {
         chain: Arc::clone(&tc.chain),
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
     })
     .await
     .expect("listen");
@@ -216,6 +217,7 @@ async fn sync_gate_holds_constraints_until_a_fresh_tip() {
         chain: Arc::clone(&tc.chain),
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
     })
     .await
     .expect("listen");

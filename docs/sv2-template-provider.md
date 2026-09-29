@@ -311,8 +311,11 @@ Ships the listener, bootstrap, tip push, transaction data, and
 - **Green:** `ChainHub::subscribe_tips()` consumer; rebuild per session
   with its constraints; retire on the grace timer.
 - **Refactor:** one "publish template" path shared by bootstrap and tip
-  (Plan C adds the fee trigger to it).
-- **Verify:** journey filter; `cargo test -p rbitcoin-sv2 tip_`
+  (Plan C adds the fee trigger to it). The session selects over client
+  frames, tip events, and the grace deadline; frames come from a reader
+  task because a Noise `recv` is not cancel-safe.
+- **Verify:** journey filter; `cargo test -p rbitcoin-sv2 --lib` (the sync
+  gate unit now clears on the tip event)
 
 ### B7 — SubmitSolution → accept_block
 

@@ -8,6 +8,7 @@ use codec_sv2::{
 use noise_sv2::{Initiator, Responder};
 use std::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
 /// One decrypted SV2 frame: header message type and owned payload.
@@ -17,13 +18,24 @@ pub struct Frame {
 }
 
 pub(crate) struct NoiseConn {
-    stream: TcpStream,
-    encoder: NoiseEncoder,
+    reader: NoiseReader,
+    writer: NoiseWriter,
+}
+
+/// Receive half. `recv` is not cancel-safe: a dropped call loses a partly
+/// read frame, so a session that selects over input reads from a task.
+pub(crate) struct NoiseReader {
+    stream: OwnedReadHalf,
     decoder: NoiseDecoder,
-    tx: TransportEncryptState,
     // `next_transport_frame` consumes the state; a failed round leaves `None`
     // and the connection must close (codec_sv2 nonce rule).
     rx: Option<TransportDecryptState>,
+}
+
+pub(crate) struct NoiseWriter {
+    stream: OwnedWriteHalf,
+    encoder: NoiseEncoder,
+    tx: TransportEncryptState,
 }
 
 fn codec_err(e: codec_sv2::Error) -> io::Error {
@@ -57,13 +69,7 @@ impl NoiseConn {
             .write_all(encoder.encode_handshake(reply).as_ref())
             .await?;
         let (tx, rx) = transport.split();
-        Ok(Self {
-            stream,
-            encoder,
-            decoder,
-            tx,
-            rx: Some(rx),
-        })
+        Ok(Self::new(stream, encoder, decoder, tx, rx))
     }
 
     pub(crate) async fn connect(
@@ -92,15 +98,49 @@ impl NoiseConn {
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "sv2: handshake size"))?;
         let (tx, rx) = sent.step_2(reply).map_err(codec_err)?.split();
-        Ok(Self {
-            stream,
-            encoder,
-            decoder,
-            tx,
-            rx: Some(rx),
-        })
+        Ok(Self::new(stream, encoder, decoder, tx, rx))
     }
 
+    fn new(
+        stream: TcpStream,
+        encoder: NoiseEncoder,
+        decoder: NoiseDecoder,
+        tx: TransportEncryptState,
+        rx: TransportDecryptState,
+    ) -> Self {
+        let (read, write) = stream.into_split();
+        Self {
+            reader: NoiseReader {
+                stream: read,
+                decoder,
+                rx: Some(rx),
+            },
+            writer: NoiseWriter {
+                stream: write,
+                encoder,
+                tx,
+            },
+        }
+    }
+
+    pub(crate) fn into_split(self) -> (NoiseReader, NoiseWriter) {
+        (self.reader, self.writer)
+    }
+
+    pub(crate) async fn send<T: Serialize + GetSize>(
+        &mut self,
+        msg_type: u8,
+        msg: T,
+    ) -> io::Result<()> {
+        self.writer.send(msg_type, msg).await
+    }
+
+    pub(crate) async fn recv(&mut self) -> io::Result<Frame> {
+        self.reader.recv().await
+    }
+}
+
+impl NoiseWriter {
     pub(crate) async fn send<T: Serialize + GetSize>(
         &mut self,
         msg_type: u8,
@@ -115,7 +155,9 @@ impl NoiseConn {
             .map_err(codec_err)?;
         self.stream.write_all(bytes.as_ref()).await
     }
+}
 
+impl NoiseReader {
     pub(crate) async fn recv(&mut self) -> io::Result<Frame> {
         loop {
             let state = self

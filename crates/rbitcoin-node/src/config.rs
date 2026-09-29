@@ -322,6 +322,8 @@ pub struct NodeConfig {
     pub sv2_tp_authority_sec: Option<[u8; 32]>,
     /// Validity of each per-connection Noise certificate. Default 3600 s.
     pub sv2_tp_cert_validity_secs: u64,
+    /// How long a template on a replaced tip still answers. Default 10 s.
+    pub sv2_tp_stale_grace_secs: u64,
     /// Skip script/prevout checks for blocks at or below this height (0 = off).
     pub milestone_height: u32,
     /// Set when conf or CLI applied `milestone` (including 0).
@@ -402,6 +404,7 @@ impl Default for NodeConfig {
             sv2_tp_listen: None,
             sv2_tp_authority_sec: None,
             sv2_tp_cert_validity_secs: 3600,
+            sv2_tp_stale_grace_secs: 10,
             milestone_height: 0,
             milestone_explicit: false,
             inhibit_suspend: false,
@@ -1096,6 +1099,11 @@ impl NodeConfig {
                     })?;
                 self.sv2_tp_authority_sec = Some(sec);
             }
+            "sv2_tp_stale_grace" => {
+                self.sv2_tp_stale_grace_secs = val
+                    .parse()
+                    .map_err(|e| NodeError::Config(format!("conf sv2_tp_stale_grace: {e}")))?;
+            }
             "sv2_tp_cert_validity" => {
                 self.sv2_tp_cert_validity_secs =
                     val.parse().ok().filter(|&s| s > 0).ok_or_else(|| {
@@ -1588,14 +1596,17 @@ mod tests {
         let mut c = NodeConfig::default().with_datadir(tmp());
         assert_eq!(c.sv2_tp_listen, None);
         assert_eq!(c.sv2_tp_cert_validity_secs, 3600);
+        assert_eq!(c.sv2_tp_stale_grace_secs, 10);
         for (k, v) in [
             ("sv2_tp_listen", "127.0.0.1:8442"),
             ("sv2_tp_cert_validity", "600"),
+            ("sv2_tp_stale_grace", "0"),
         ] {
             assert_eq!(c.apply_kv(k, v).unwrap(), ConfApply::Applied);
         }
         assert_eq!(c.sv2_tp_listen, Some("127.0.0.1:8442".parse().unwrap()));
         assert_eq!(c.sv2_tp_cert_validity_secs, 600);
+        assert_eq!(c.sv2_tp_stale_grace_secs, 0);
         let no_auth = c.validate().unwrap_err();
         assert!(
             format!("{no_auth}").contains("sv2-tp-authority-sec"),
@@ -1617,6 +1628,7 @@ mod tests {
             ("sv2_tp_authority_sec", zero.as_str()),
             ("sv2_tp_authority_sec", not_hex.as_str()),
             ("sv2_tp_cert_validity", "0"),
+            ("sv2_tp_stale_grace", "-1"),
         ] {
             let e = format!("{}", c.apply_kv(k, v).unwrap_err());
             assert!(e.contains(k), "garbage must name the knob: {e}");

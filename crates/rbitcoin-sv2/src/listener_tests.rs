@@ -42,6 +42,7 @@ async fn setup_connection_success_errors_and_session_cap() {
         chain: tc.chain.clone(),
         authority_secret: [7; 32],
         cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
     })
     .await
     .expect("listen");

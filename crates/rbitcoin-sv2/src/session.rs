@@ -1,8 +1,9 @@
 //! One TDP session: Noise handshake, `SetupConnection`, then TDP messages.
 
 use crate::template;
-use crate::transport::{Frame, NoiseConn};
+use crate::transport::{Frame, NoiseConn, NoiseWriter};
 use binary_sv2::{Seq064K, Str0255, B016M, B064K};
+use bitcoin::hashes::Hash;
 use common_messages_sv2::{
     Protocol, SetupConnection, SetupConnectionError, SetupConnectionSuccess,
     ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH,
@@ -15,6 +16,7 @@ use rbitcoin_net::{BlockingRegion, ChainHub};
 use std::collections::VecDeque;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 use template_distribution_sv2::{
     CoinbaseOutputConstraints, RequestTransactionData, RequestTransactionDataError,
     RequestTransactionDataSuccess, ERROR_CODE_REQUEST_TRANSACTION_DATA_STALE_TEMPLATE_ID,
@@ -25,6 +27,9 @@ use template_distribution_sv2::{
 };
 use tokio::net::TcpStream;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 const TDP_VERSION: u16 = 2;
 
@@ -38,7 +43,8 @@ const MAX_RETAINED: usize = 3;
 struct Templates {
     last_id: u64,
     current_prev: Option<[u8; 32]>,
-    retained: VecDeque<(u64, template::Template)>,
+    /// `(id, template, retire_at)`; `retire_at` is set once the tip moves on.
+    retained: VecDeque<(u64, template::Template, Option<Instant>)>,
 }
 
 impl Templates {
@@ -46,58 +52,166 @@ impl Templates {
         if self.retained.len() == MAX_RETAINED {
             self.retained.pop_front();
         }
-        self.retained.push_back((id, t));
+        self.retained.push_back((id, t, None));
     }
 
     fn get(&self, id: u64) -> Option<&template::Template> {
-        self.retained.iter().find(|(i, _)| *i == id).map(|(_, t)| t)
+        self.retained
+            .iter()
+            .find(|(i, ..)| *i == id)
+            .map(|(_, t, _)| t)
     }
-}
 
-#[derive(Clone, Copy)]
-enum Phase {
-    AwaitingSetup,
-    AwaitingConstraints,
-    Active,
-}
+    /// Every retained template predates the new prev hash.
+    fn start_grace(&mut self, deadline: Instant) {
+        for (.., at) in &mut self.retained {
+            at.get_or_insert(deadline);
+        }
+    }
 
-enum Next {
-    Continue(Phase),
-    Close,
+    fn next_retire(&self) -> Option<Instant> {
+        self.retained.iter().filter_map(|(.., at)| *at).min()
+    }
+
+    fn retire(&mut self, now: Instant) {
+        self.retained.retain(|(.., at)| at.is_none_or(|d| d > now));
+    }
 }
 
 pub(crate) async fn serve(
     stream: TcpStream,
     responder: Box<Responder>,
     chain: Arc<ChainHub>,
+    stale_grace: Duration,
 ) -> io::Result<()> {
     let mut conn = NoiseConn::accept(stream, responder).await?;
-    let mut phase = Phase::AwaitingSetup;
-    let mut templates = Templates::default();
-    loop {
-        let frame = conn.recv().await?;
-        let next = match phase {
-            Phase::AwaitingSetup => on_setup(&mut conn, frame).await?,
-            Phase::AwaitingConstraints | Phase::Active
-                if frame.msg_type == MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS =>
-            {
-                on_constraints(&mut conn, &chain, frame, &mut templates).await?
+    let frame = conn.recv().await?;
+    if !on_setup(&mut conn, frame).await? {
+        return Ok(());
+    }
+    let (mut reader, writer) = conn.into_split();
+    let (frames_tx, mut frames) = mpsc::channel(1);
+    // Dropping the set aborts the reader when the session ends.
+    let mut pump = JoinSet::new();
+    pump.spawn(async move {
+        loop {
+            let f = reader.recv().await;
+            let end = f.is_err();
+            if frames_tx.send(f).await.is_err() || end {
+                return;
             }
-            Phase::AwaitingConstraints | Phase::Active
-                if frame.msg_type == MESSAGE_TYPE_REQUEST_TRANSACTION_DATA =>
-            {
-                on_request_transaction_data(&mut conn, frame, &templates).await?;
-                Next::Continue(phase)
+        }
+    });
+    let mut s = Session {
+        conn: writer,
+        chain,
+        stale_grace,
+        constraints: None,
+        templates: Templates::default(),
+        held_logged: false,
+    };
+    s.run(&mut frames).await
+}
+
+struct Session {
+    conn: NoiseWriter,
+    chain: Arc<ChainHub>,
+    stale_grace: Duration,
+    /// Last `CoinbaseOutputConstraints`: `(max_additional_size, sigops)`.
+    constraints: Option<(u32, u16)>,
+    templates: Templates,
+    held_logged: bool,
+}
+
+impl Session {
+    async fn run(&mut self, frames: &mut mpsc::Receiver<io::Result<Frame>>) -> io::Result<()> {
+        let mut tips = self.chain.subscribe_tips();
+        loop {
+            let retire_at = self.templates.next_retire();
+            tokio::select! {
+                f = frames.recv() => {
+                    let Some(f) = f else { return Ok(()) };
+                    if !self.on_frame(f?).await? {
+                        return Ok(());
+                    }
+                }
+                tip = tips.recv() => match tip {
+                    Ok(ev) if self.templates.current_prev == Some(ev.hash.to_byte_array()) => {}
+                    Ok(_) | Err(RecvError::Lagged(_)) => self.publish().await?,
+                    Err(RecvError::Closed) => return Ok(()),
+                },
+                _ = tokio::time::sleep_until(retire_at.unwrap_or_else(Instant::now)),
+                    if retire_at.is_some() =>
+                {
+                    self.templates.retire(Instant::now());
+                }
             }
-            Phase::AwaitingConstraints | Phase::Active => {
-                rbitcoin_log::info!("sv2: ignoring message {:#x}", frame.msg_type);
-                Next::Continue(phase)
+        }
+    }
+
+    /// `false`: close the session.
+    async fn on_frame(&mut self, mut frame: Frame) -> io::Result<bool> {
+        match frame.msg_type {
+            MESSAGE_TYPE_COINBASE_OUTPUT_CONSTRAINTS => {
+                let Ok(c) = binary_sv2::from_bytes::<CoinbaseOutputConstraints>(&mut frame.payload)
+                else {
+                    rbitcoin_log::info!("sv2: undecodable CoinbaseOutputConstraints");
+                    return Ok(false);
+                };
+                self.constraints = Some((
+                    c.coinbase_output_max_additional_size,
+                    c.coinbase_output_max_additional_sigops,
+                ));
+                self.publish().await?;
             }
+            MESSAGE_TYPE_REQUEST_TRANSACTION_DATA => {
+                on_request_transaction_data(&mut self.conn, frame, &self.templates).await?;
+            }
+            t => rbitcoin_log::info!("sv2: ignoring message {t:#x}"),
+        }
+        Ok(true)
+    }
+
+    /// Build on the current tip and send it. No template while in IBD:
+    /// leaving IBD always comes with a new tip, which calls this again.
+    async fn publish(&mut self) -> io::Result<()> {
+        let Some((size, sigops)) = self.constraints else {
+            return Ok(());
         };
-        phase = match next {
-            Next::Continue(p) => p,
-            Next::Close => return Ok(()),
+        let c = Arc::clone(&self.chain);
+        let t = tokio::task::spawn_blocking(move || {
+            let _g = BlockingRegion::enter();
+            (!c.in_ibd())
+                .then(|| template::build(&c, size, sigops))
+                .transpose()
+        })
+        .await
+        .map_err(io::Error::other)??;
+        let Some(t) = t else {
+            if !self.held_logged {
+                rbitcoin_log::info!("sv2: holding templates until the node leaves IBD");
+                self.held_logged = true;
+            }
+            return Ok(());
         };
+        self.templates.last_id += 1;
+        let template_id = self.templates.last_id;
+        // sv2-spec 07 §7.3: a template on a new prev hash is future, then activated.
+        let new_prev = self.templates.current_prev != Some(t.prev_hash);
+        let msg = t
+            .to_message(template_id, new_prev)
+            .map_err(|e| io::Error::other(format!("sv2 NewTemplate: {e:?}")))?;
+        self.conn.send(MESSAGE_TYPE_NEW_TEMPLATE, msg).await?;
+        if new_prev {
+            self.conn
+                .send(MESSAGE_TYPE_SET_NEW_PREV_HASH, t.to_prev_hash(template_id))
+                .await?;
+            self.templates.current_prev = Some(t.prev_hash);
+            self.templates
+                .start_grace(Instant::now() + self.stale_grace);
+        }
+        self.templates.retain(template_id, t);
+        Ok(())
     }
 }
 
@@ -118,14 +232,15 @@ fn setup_error(m: &SetupConnection) -> Option<(u32, &'static str)> {
     None
 }
 
-async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<Next> {
+/// `false`: close the session.
+async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<bool> {
     if frame.msg_type != MESSAGE_TYPE_SETUP_CONNECTION {
         rbitcoin_log::info!("sv2: message {:#x} before SetupConnection", frame.msg_type);
-        return Ok(Next::Close);
+        return Ok(false);
     }
     let Ok(setup) = binary_sv2::from_bytes::<SetupConnection>(&mut frame.payload) else {
         rbitcoin_log::info!("sv2: undecodable SetupConnection");
-        return Ok(Next::Close);
+        return Ok(false);
     };
     if let Some((flags, code)) = setup_error(&setup) {
         let error_code = Str0255::try_from(code)
@@ -133,7 +248,7 @@ async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<Next> {
         let reply = SetupConnectionError { flags, error_code };
         conn.send(MESSAGE_TYPE_SETUP_CONNECTION_ERROR, reply)
             .await?;
-        return Ok(Next::Close);
+        return Ok(false);
     }
     let reply = SetupConnectionSuccess {
         used_version: TDP_VERSION,
@@ -141,47 +256,13 @@ async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<Next> {
     };
     conn.send(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, reply)
         .await?;
-    Ok(Next::Continue(Phase::AwaitingConstraints))
-}
-
-async fn on_constraints(
-    conn: &mut NoiseConn,
-    chain: &Arc<ChainHub>,
-    mut frame: Frame,
-    templates: &mut Templates,
-) -> io::Result<Next> {
-    let Ok(c) = binary_sv2::from_bytes::<CoinbaseOutputConstraints>(&mut frame.payload) else {
-        rbitcoin_log::info!("sv2: undecodable CoinbaseOutputConstraints");
-        return Ok(Next::Close);
-    };
-    let (size, sigops) = (
-        c.coinbase_output_max_additional_size,
-        c.coinbase_output_max_additional_sigops,
-    );
-    let Some(t) = synced_template(chain, size, sigops).await? else {
-        return Ok(Next::Close);
-    };
-    templates.last_id += 1;
-    let template_id = templates.last_id;
-    // sv2-spec 07 §7.3: a template on a new prev hash is future, then activated.
-    let new_prev = templates.current_prev != Some(t.prev_hash);
-    let msg = t
-        .to_message(template_id, new_prev)
-        .map_err(|e| io::Error::other(format!("sv2 NewTemplate: {e:?}")))?;
-    conn.send(MESSAGE_TYPE_NEW_TEMPLATE, msg).await?;
-    if new_prev {
-        conn.send(MESSAGE_TYPE_SET_NEW_PREV_HASH, t.to_prev_hash(template_id))
-            .await?;
-        templates.current_prev = Some(t.prev_hash);
-    }
-    templates.retain(template_id, t);
-    Ok(Next::Continue(Phase::Active))
+    Ok(true)
 }
 
 /// An id this session was sent but no longer retains is stale; any other
 /// unknown id was never sent.
 async fn on_request_transaction_data(
-    conn: &mut NoiseConn,
+    conn: &mut NoiseWriter,
     mut frame: Frame,
     templates: &Templates,
 ) -> io::Result<()> {
@@ -226,37 +307,4 @@ async fn on_request_transaction_data(
     };
     conn.send(MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS, reply)
         .await
-}
-
-/// No template while in IBD. Leaving IBD always comes with a new tip, so the
-/// gate rechecks on tip events. `None`: the tip channel closed (shutdown).
-async fn synced_template(
-    chain: &Arc<ChainHub>,
-    size: u32,
-    sigops: u16,
-) -> io::Result<Option<template::Template>> {
-    let mut tips = chain.subscribe_tips();
-    let mut logged = false;
-    loop {
-        let c = Arc::clone(chain);
-        let t = tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            (!c.in_ibd())
-                .then(|| template::build(&c, size, sigops))
-                .transpose()
-        })
-        .await
-        .map_err(io::Error::other)??;
-        if t.is_some() {
-            return Ok(t);
-        }
-        if !logged {
-            rbitcoin_log::info!("sv2: holding templates until the node leaves IBD");
-            logged = true;
-        }
-        match tips.recv().await {
-            Ok(_) | Err(RecvError::Lagged(_)) => {}
-            Err(RecvError::Closed) => return Ok(None),
-        }
-    }
 }

@@ -2842,6 +2842,7 @@ async fn sv2_tp_bootstrap() {
     cfg.rpc.listen = Some(rpc_addr);
     cfg.sv2_tp_listen = Some(sv2_addr);
     cfg.sv2_tp_authority_sec = Some(SV2_AUTHORITY_SEC);
+    cfg.sv2_tp_stale_grace_secs = 1;
     std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
     cfg.max_run_secs = Some(60);
     let node = tokio::spawn(run_p2p(cfg));
@@ -2919,9 +2920,10 @@ async fn sv2_tp_bootstrap() {
         (t2.template_id + 100, "template-id-not-found".to_string())
     );
     // Three templates retained per session: the oldest is now stale.
+    let mut last = t2.template_id;
     for _ in 0..2 {
         c.coinbase_output_constraints(0, 0).await.unwrap();
-        sv2_template(sv2_recv(&mut c).await);
+        last = sv2_template(sv2_recv(&mut c).await).template_id;
     }
     c.request_transaction_data(t.template_id).await.unwrap();
     assert_eq!(
@@ -2930,6 +2932,34 @@ async fn sv2_tp_bootstrap() {
     );
     c.request_transaction_data(t2.template_id).await.unwrap();
     assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).2.len(), 1);
+
+    // A new tip is pushed unasked; the old tip's template lives for the grace.
+    let mined = jsonrpc(rpc_addr, "generateblock", json!(["raw(51)", []])).await;
+    let mined = bitcoin::BlockHash::from_str(mined["result"]["hash"].as_str().unwrap()).unwrap();
+    let pushed = sv2_template(sv2_recv(&mut c).await);
+    assert!(pushed.future_template, "tip push is a future template");
+    assert!(pushed.template_id > last);
+    let mut f = sv2_recv(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_SET_NEW_PREV_HASH);
+    let p: SetNewPrevHash = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(p.template_id, pushed.template_id);
+    assert_eq!(p.prev_hash.as_ref(), mined.to_byte_array());
+    c.request_transaction_data(last).await.unwrap();
+    assert_eq!(
+        sv2_tx_data(sv2_recv(&mut c).await).0,
+        last,
+        "within the grace"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    c.request_transaction_data(last).await.unwrap();
+    assert_eq!(
+        sv2_tx_data_error(sv2_recv(&mut c).await),
+        (last, "stale-template-id".to_string())
+    );
+    c.request_transaction_data(pushed.template_id)
+        .await
+        .unwrap();
+    assert_eq!(sv2_tx_data(sv2_recv(&mut c).await).0, pushed.template_id);
 
     let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
     let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;

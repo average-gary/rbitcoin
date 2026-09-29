@@ -33,6 +33,8 @@ pub struct Sv2TpConfig {
     pub authority_secret: [u8; 32],
     /// Validity of the per-connection Noise certificate signed by the authority.
     pub cert_validity: Duration,
+    /// How long a template on a replaced prev hash still answers requests.
+    pub stale_grace: Duration,
 }
 
 pub struct Sv2TpHandle {
@@ -68,6 +70,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
     let authority_pubkey = keypair.x_only_public_key().0.serialize();
     let authority_secret = config.authority_secret;
     let cert_validity = config.cert_validity;
+    let stale_grace = config.stale_grace;
     let chain = config.chain;
     let listener = TcpListener::bind(config.listen).await?;
     let local_addr = listener.local_addr()?;
@@ -105,7 +108,7 @@ pub async fn run_sv2_tp(config: Sv2TpConfig) -> io::Result<Sv2TpHandle> {
             let chain = Arc::clone(&chain);
             let h = tokio::spawn(async move {
                 let _slot = slot;
-                match session::serve(stream, responder, chain).await {
+                match session::serve(stream, responder, chain, stale_grace).await {
                     Ok(()) => rbitcoin_log::info!("sv2: disconnect {peer}"),
                     Err(e) => rbitcoin_log::info!("sv2: disconnect {peer} ({e})"),
                 }
