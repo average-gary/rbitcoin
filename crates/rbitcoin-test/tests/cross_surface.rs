@@ -2755,3 +2755,135 @@ async fn enter_tip_mode_indexes() {
     }
     stop_run_p2p(rpc_addr, node).await;
 }
+
+/// Authority secret for the SV2 TP journey; the client derives the pubkey.
+const SV2_AUTHORITY_SEC: [u8; 32] = [7; 32];
+
+async fn sv2_recv(c: &mut rbitcoin_sv2::testutil::TpClient) -> rbitcoin_sv2::Frame {
+    tokio::time::timeout(Duration::from_secs(10), c.recv())
+        .await
+        .expect("sv2 message in time")
+        .expect("sv2 message")
+}
+
+struct Sv2Template {
+    template_id: u64,
+    future_template: bool,
+    value_remaining: u64,
+    merkle_path: Vec<[u8; 32]>,
+}
+
+fn sv2_template(mut f: rbitcoin_sv2::Frame) -> Sv2Template {
+    assert_eq!(
+        f.msg_type,
+        template_distribution_sv2::MESSAGE_TYPE_NEW_TEMPLATE
+    );
+    let t: template_distribution_sv2::NewTemplate = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    Sv2Template {
+        template_id: t.template_id,
+        future_template: t.future_template,
+        value_remaining: t.coinbase_tx_value_remaining,
+        merkle_path: t
+            .merkle_path
+            .iter()
+            .map(|h| h.as_ref().try_into().unwrap())
+            .collect(),
+    }
+}
+
+/// An SV2 client on a node whose chain is stale: no template until a fresh
+/// tip ends IBD, then the pair on the RPC tip, then a non-future template
+/// carrying a transaction sent over RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn sv2_tp_bootstrap() {
+    use template_distribution_sv2::{SetNewPrevHash, MESSAGE_TYPE_SET_NEW_PREV_HASH};
+
+    let td = TestDatadir::new().unwrap();
+    let params = ChainParams::regtest();
+    let coinbase = {
+        let q = Query::open_or_create_tiny(td.store_path()).unwrap();
+        let chain = build_mature_regtest_with_spend(&q, &params);
+        q.flush().unwrap();
+        chain.blocks[2].txdata[0].compute_txid()
+    };
+
+    let rpc_addr = ephemeral_addr();
+    let sv2_addr = ephemeral_addr();
+    let mut cfg = NodeConfig::default()
+        .with_datadir(td.path())
+        .with_network(Network::Regtest)
+        .with_tiny_heads()
+        .with_p2p_listen("127.0.0.1:0".parse().unwrap());
+    cfg.listen.use_seeds = false;
+    cfg.listen.connect.clear();
+    cfg.rpc.listen = Some(rpc_addr);
+    cfg.sv2_tp_listen = Some(sv2_addr);
+    cfg.sv2_tp_authority_sec = Some(SV2_AUTHORITY_SEC);
+    std::fs::write(td.path().join("rpc.token"), "pass").unwrap();
+    cfg.max_run_secs = Some(60);
+    let node = tokio::spawn(run_p2p(cfg));
+    wait_listeners(&[rpc_addr, sv2_addr]).await;
+
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let authority = bitcoin::secp256k1::Keypair::from_seckey_slice(&secp, &SV2_AUTHORITY_SEC)
+        .unwrap()
+        .x_only_public_key()
+        .0
+        .serialize();
+    let mut c = rbitcoin_sv2::testutil::TpClient::connect(sv2_addr, authority)
+        .await
+        .expect("sv2 handshake");
+    c.setup_connection(2, 2, 2, 0).await.unwrap();
+    sv2_recv(&mut c).await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+
+    // One recv future across the gate: dropping it mid-frame breaks Noise.
+    let first = {
+        let recv = c.recv();
+        tokio::pin!(recv);
+        let held = tokio::time::timeout(Duration::from_millis(500), &mut recv).await;
+        assert!(held.is_err(), "no template while the stale tip keeps IBD");
+        let mined = jsonrpc(rpc_addr, "generateblock", json!(["raw(51)", []])).await;
+        assert!(mined["result"]["hash"].is_string(), "{mined}");
+        tokio::time::timeout(Duration::from_secs(10), recv)
+            .await
+            .expect("template after the fresh tip")
+            .expect("sv2 message")
+    };
+    let t = sv2_template(first);
+    assert!(t.future_template, "first template on a prev hash is future");
+    assert!(t.merkle_path.is_empty(), "empty mempool");
+    let mut f = sv2_recv(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_SET_NEW_PREV_HASH);
+    let p: SetNewPrevHash = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(p.template_id, t.template_id);
+    let best = jsonrpc(rpc_addr, "getbestblockhash", json!([])).await;
+    let best = bitcoin::BlockHash::from_str(best["result"].as_str().unwrap()).unwrap();
+    assert_eq!(p.prev_hash.as_ref(), best.to_byte_array());
+    let gbt = jsonrpc(rpc_addr, "getblocktemplate", json!([{"rules": ["segwit"]}])).await;
+    let bits = u32::from_str_radix(gbt["result"]["bits"].as_str().unwrap(), 16).unwrap();
+    assert_eq!(p.n_bits, bits, "{gbt}");
+
+    let fee = 10_000;
+    let tx = acs_spend(
+        coinbase,
+        50_0000_0000,
+        fee,
+        ScriptBuf::from_bytes(vec![0x51]),
+    );
+    let sent = jsonrpc(rpc_addr, "sendrawtransaction", json!([encode_tx(&tx)])).await;
+    assert_eq!(sent["result"], tx.compute_txid().to_string(), "{sent}");
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let t2 = sv2_template(sv2_recv(&mut c).await);
+    assert!(!t2.future_template, "same prev hash: no new SetNewPrevHash");
+    assert!(t2.template_id > t.template_id);
+    assert_eq!(t2.value_remaining, t.value_remaining + fee);
+    assert_eq!(t2.merkle_path, [tx.compute_txid().to_byte_array()]);
+
+    let _ = jsonrpc(rpc_addr, "stop", json!([])).await;
+    let stopped = tokio::time::timeout(Duration::from_secs(15), node).await;
+    assert!(
+        matches!(stopped, Ok(Ok(Ok(())))),
+        "run_p2p did not stop cleanly"
+    );
+}

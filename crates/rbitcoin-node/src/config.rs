@@ -316,6 +316,12 @@ pub struct NodeConfig {
     pub metrics: bool,
     /// ADD_ONION for `--esplora-listen` when `--tor-control` is set. Default on.
     pub esplora_onion: bool,
+    /// SV2 Template Provider bind (`--sv2-tp-listen`). Default off.
+    pub sv2_tp_listen: Option<SocketAddr>,
+    /// Authority secret key the TP signs its Noise certificates with.
+    pub sv2_tp_authority_sec: Option<[u8; 32]>,
+    /// Validity of each per-connection Noise certificate. Default 3600 s.
+    pub sv2_tp_cert_validity_secs: u64,
     /// Skip script/prevout checks for blocks at or below this height (0 = off).
     pub milestone_height: u32,
     /// Set when conf or CLI applied `milestone` (including 0).
@@ -393,6 +399,9 @@ impl Default for NodeConfig {
             esplora_block_template: false,
             metrics: false,
             esplora_onion: true,
+            sv2_tp_listen: None,
+            sv2_tp_authority_sec: None,
+            sv2_tp_cert_validity_secs: 3600,
             milestone_height: 0,
             milestone_explicit: false,
             inhibit_suspend: false,
@@ -612,6 +621,11 @@ impl NodeConfig {
         }
         if self.metrics && self.listen.health.is_none() {
             return Err(NodeError::Config("--metrics needs --health-listen".into()));
+        }
+        if self.sv2_tp_listen.is_some() && self.sv2_tp_authority_sec.is_none() {
+            return Err(NodeError::Config(
+                "--sv2-tp-listen requires --sv2-tp-authority-sec".into(),
+            ));
         }
         self.validate_only_net()?;
         self.validate_hidden_inbound()?;
@@ -1064,6 +1078,29 @@ impl NodeConfig {
             "esplora_onion" => {
                 self.esplora_onion = parse_conf_bool(val)
                     .map_err(|e| NodeError::Config(format!("conf esplora_onion: {e}")))?;
+            }
+            "sv2_tp_listen" => {
+                self.sv2_tp_listen = Some(
+                    val.parse()
+                        .map_err(|e| NodeError::Config(format!("conf sv2_tp_listen: {e}")))?,
+                );
+            }
+            "sv2_tp_authority_sec" => {
+                let sec = <[u8; 32]>::from_hex(val)
+                    .ok()
+                    .filter(|k| bitcoin::secp256k1::SecretKey::from_slice(k).is_ok())
+                    .ok_or_else(|| {
+                        NodeError::Config(
+                            "conf sv2_tp_authority_sec: want a 64-hex secp256k1 secret key".into(),
+                        )
+                    })?;
+                self.sv2_tp_authority_sec = Some(sec);
+            }
+            "sv2_tp_cert_validity" => {
+                self.sv2_tp_cert_validity_secs =
+                    val.parse().ok().filter(|&s| s > 0).ok_or_else(|| {
+                        NodeError::Config("conf sv2_tp_cert_validity: want seconds > 0".into())
+                    })?;
             }
             "rpc" => {
                 self.rpc.socket = parse_conf_bool(val)
@@ -1544,6 +1581,46 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("rpc_socket requires a path"), "{err}");
+    }
+
+    #[test]
+    fn sv2_tp_apply_kv_and_listen_requires_authority() {
+        let mut c = NodeConfig::default().with_datadir(tmp());
+        assert_eq!(c.sv2_tp_listen, None);
+        assert_eq!(c.sv2_tp_cert_validity_secs, 3600);
+        for (k, v) in [
+            ("sv2_tp_listen", "127.0.0.1:8442"),
+            ("sv2_tp_cert_validity", "600"),
+        ] {
+            assert_eq!(c.apply_kv(k, v).unwrap(), ConfApply::Applied);
+        }
+        assert_eq!(c.sv2_tp_listen, Some("127.0.0.1:8442".parse().unwrap()));
+        assert_eq!(c.sv2_tp_cert_validity_secs, 600);
+        let no_auth = c.validate().unwrap_err();
+        assert!(
+            format!("{no_auth}").contains("sv2-tp-authority-sec"),
+            "{no_auth}"
+        );
+        assert_eq!(
+            c.apply_kv("sv2_tp_authority_sec", &"07".repeat(32))
+                .unwrap(),
+            ConfApply::Applied
+        );
+        assert_eq!(c.sv2_tp_authority_sec, Some([7; 32]));
+        assert!(c.validate().is_ok());
+
+        let zero = "00".repeat(32);
+        let not_hex = "zz".repeat(32);
+        for (k, v) in [
+            ("sv2_tp_listen", "nope"),
+            ("sv2_tp_authority_sec", "07"),
+            ("sv2_tp_authority_sec", zero.as_str()),
+            ("sv2_tp_authority_sec", not_hex.as_str()),
+            ("sv2_tp_cert_validity", "0"),
+        ] {
+            let e = format!("{}", c.apply_kv(k, v).unwrap_err());
+            assert!(e.contains(k), "garbage must name the knob: {e}");
+        }
     }
 
     #[test]
