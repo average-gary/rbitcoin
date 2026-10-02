@@ -242,13 +242,19 @@ async fn client_that_stops_reading_is_dropped_at_the_write_deadline() {
         .expect("handshake");
     c.setup_connection(TDP, 2, 2, 0).await.unwrap();
     c.recv().await.expect("setup reply");
+    // Without constraints the setup deadline closes the session at
+    // SETUP_TIMEOUT: the flood must lose only to the write deadline. The
+    // stale tip holds the template, so constraints add no traffic.
+    c.coinbase_output_constraints(0, 0).await.unwrap();
 
     // Each unknown id answers RequestTransactionData.Error, which the
     // client never reads: the TP blocks on write, then stops reading.
     let mut jammed = false;
     for id in 1..=1_000_000u64 {
         let sent = tokio::time::timeout(write_timeout, c.request_transaction_data(id)).await;
-        if sent.is_err() {
+        // A stall past the write deadline, or a fast write error once the
+        // closed session turns sends into EPIPE: the pipe is dead either way.
+        if !matches!(sent, Ok(Ok(()))) {
             jammed = true;
             break;
         }
