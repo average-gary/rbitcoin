@@ -59,6 +59,8 @@ struct Templates {
     current_prev: Option<[u8; 32]>,
     /// `SetNewPrevHash.header_timestamp` sent for `current_prev`, and when.
     prev_sent: Option<(u32, Instant)>,
+    /// `SetNewPrevHash.n_bits` and `target` sent for `current_prev`.
+    sent_bits: Option<(u32, [u8; 32])>,
     /// A template was built since the last tip event.
     built_since_tip: bool,
     retained: VecDeque<Retained>,
@@ -284,7 +286,7 @@ impl Session {
         })
         .await
         .map_err(io::Error::other)??;
-        let Some(t) = t else {
+        let Some(mut t) = t else {
             if !self.held_logged {
                 rbitcoin_log::info!("sv2: holding templates until the node leaves IBD");
                 self.held_logged = true;
@@ -295,6 +297,13 @@ impl Session {
         let template_id = self.templates.last_id;
         // sv2-spec 07 §7.3: a template on a new prev hash is future, then activated.
         let new_prev = self.templates.current_prev != Some(t.prev_hash);
+        // §7.4: nBits comes once per prev hash. On min-difficulty networks the
+        // build's bits follow the clock; a solution on this template is hashed
+        // with the bits the client was sent.
+        if let Some((n_bits, target)) = self.templates.sent_bits.filter(|_| !new_prev) {
+            t.n_bits = n_bits;
+            t.target = target;
+        }
         let msg = t
             .to_message(template_id, new_prev)
             .map_err(|e| io::Error::other(format!("sv2 NewTemplate: {e:?}")))?;
@@ -308,6 +317,7 @@ impl Session {
             let now = Instant::now();
             self.templates.current_prev = Some(t.prev_hash);
             self.templates.prev_sent = Some((t.header_timestamp, now));
+            self.templates.sent_bits = Some((t.n_bits, t.target));
             self.templates.start_grace(now + self.stale_grace);
         }
         let prev_sent = self

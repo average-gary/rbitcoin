@@ -1,4 +1,4 @@
-use crate::test_chain::{padded_chain, TestChain};
+use crate::test_chain::{padded_chain, padded_chain_with, TestChain};
 use crate::testutil::TpClient;
 use crate::{run_sv2_tp, Sv2TpConfig, SETUP_TIMEOUT, WRITE_TIMEOUT};
 use bitcoin::consensus::encode::serialize;
@@ -11,6 +11,7 @@ use bitcoin::{CompactTarget, Target};
 use rbitcoin_consensus::{
     bip34_height_script, block_subsidy, confirm_scripts_phase, expected_next_bits,
     median_time_past, mine_empty_regtest, mine_regtest_paying, witness_commitment_script,
+    ChainParams,
 };
 use rbitcoin_primitives::Height;
 use rbitcoin_store::merkle_root_from_txids;
@@ -669,6 +670,50 @@ async fn tip_event_rebuilds_a_template_built_on_its_prev_hash() {
     let on_y = expect_template(&mut c, &tc, &[], true).await;
     let rebuilt = expect_template(&mut c, &tc, &[], false).await;
     assert!(rebuilt > on_y, "y's event must rebuild the template on y");
+
+    tp.shutdown().await;
+}
+
+/// sv2-spec 07 §7.4: nBits comes with `SetNewPrevHash`, once per prev hash.
+/// Past prev + 2 × spacing a min-difficulty network's expected bits follow
+/// the header time to the pow limit; a rebuild on the same prev hash must
+/// still assemble solutions with the bits the client was sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn same_prev_hash_template_keeps_the_sent_bits() {
+    // Regtest padding at 0x207fffff, under a pow limit above it: a header
+    // past prev + 20 min expects the limit, an earlier one the padding bits.
+    let mut params = ChainParams::regtest();
+    params.pow_limit = Target::from_compact(CompactTarget::from_consensus(0x2100_ffff));
+    let tc = padded_chain_with("sv2-sent-bits", 0, params);
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id,
+        version,
+        mut header,
+        coinbase,
+    } = first_template(&tc).await;
+
+    let spacing = tc.chain.params.btc.pow_target_spacing as u32;
+    tc.chain
+        .clock
+        .set_mock(i64::from(tc.tip_time + 2 * spacing + 1));
+    c.coinbase_output_constraints(0, 1).await.unwrap();
+    let rebuilt = expect_template(&mut c, &tc, &[], false).await;
+    assert!(rebuilt > template_id);
+
+    while header.validate_pow(header.target()).is_err() {
+        header.nonce += 1;
+    }
+    c.submit_solution(rebuilt, version, header.time, header.nonce, &coinbase)
+        .await
+        .unwrap();
+    let f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_NEW_TEMPLATE);
+    assert_eq!(
+        tc.chain.tip_header().unwrap().block_hash(),
+        header.block_hash()
+    );
 
     tp.shutdown().await;
 }

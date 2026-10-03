@@ -289,7 +289,11 @@ Ships the listener, bootstrap, tip push, transaction data, and
   the same `template_id`, the tip as `prev_hash`, `header_timestamp` ≥
   MTP + 1, and the next nBits with its target. A later template on the
   same prev hash (changed constraints) is `future_template: false` with no
-  `SetNewPrevHash`. While `ChainHub::in_ibd()` (relay-inhibited: stale tip
+  `SetNewPrevHash`, and keeps that `SetNewPrevHash`'s nBits and target:
+  §7.4 sends nBits once per prev hash, so a solution on any template on it
+  is assembled with the bits the client hashed. On min-difficulty networks
+  the build's bits follow the clock past prev + 2 × spacing; recomputing
+  them would make every such solution `bad-diffbits`. While `ChainHub::in_ibd()` (relay-inhibited: stale tip
   or below min chain work), the session holds the constraints and builds
   when a tip event clears it. `getblocktemplate` has no sync gate in this
   node, so the TP gate is the relay gate; leaving IBD always comes with a
