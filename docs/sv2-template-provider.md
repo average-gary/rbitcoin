@@ -504,31 +504,6 @@ when fees rise enough to matter, throttled. Requires Plan B.
   with argv asserts.
 - **Red / Green / Refactor / Verify:** as B8b.
 
-### C3 — Min-difficulty boundary re-push
-
-- **Problem:** on min-difficulty networks (testnet3, testnet4) the build
-  fixes `n_bits` from `header_timestamp` (`expected_next_bits`). A
-  template built before prev + 20 min carries the walked-back difficulty;
-  a miner that rolls `ntime` past prev + 20 min produces a header whose
-  expected bits are the pow limit, and validation rejects it as incorrect
-  proof-of-work bits (Core `bad-diffbits`). Nothing re-pushes a template
-  when prev + 20 min passes: the session rebuilds only on a tip event or a
-  constraints change.
-- **Contract:** on networks that allow min-difficulty blocks, the session
-  arms its own deadline at prev + 2 × target spacing + 1 s (a
-  `sleep_until` arm in the session select loop, beside `retire_at` and
-  `rebuild_at`). The `+ 1` is required: `expected_next_bits` selects the
-  pow limit only when `header_time` is strictly greater than
-  prev + 2 × spacing, and the build stamps `header_timestamp` from the
-  clock, so a rebuild at exactly the boundary would keep the walked-back
-  bits and nothing would re-arm. When
-  it fires with the tip unchanged, the session rebuilds and sends
-  `NewTemplate{future_template: false}` carrying the pow-limit `n_bits`,
-  with no `SetNewPrevHash`. The deadline does not depend on C1: C1 fires
-  only when `MempoolHub::template_updates` advances, and
-  `--sv2-tp-template-interval` only throttles that push, so a quiet
-  mempool would never reach the boundary through C1.
-
 ---
 
 ## Test budget
@@ -553,6 +528,16 @@ No live pool/JDC, no mainnet datadir, no plaintext mode.
 - Authority-cert rotation: certs are short-lived
   (`--sv2-tp-cert-validity`); rotation is restart-with-new-cert in
   OPERATOR. Hot rotation is a follow-up.
+- Min-difficulty networks (testnet3, testnet4): a block's expected nBits
+  depends on its own time (the pow limit past prev + 2 × spacing), but
+  TDP sends nBits once per prev hash in `SetNewPrevHash` (sv2-spec 07
+  §7.4) and `NewTemplate` carries none, by design: templates refresh
+  often, the prev hash changes only on a block. So a TP client mines at
+  the bits it was sent for that prev hash and never at the 20-minute pow
+  limit, and a solution whose `ntime` rolls past prev + 2 × spacing is
+  `bad-diffbits` unless the sent bits were already the limit. A re-push cannot fix it: a same-hash `SetNewPrevHash`
+  is outside §7.4, and a `NewTemplate` has no field for the bits. Not
+  planned; mainnet and signet bits depend only on the prev hash.
 - Pre-existing, outside this plan: consensus does not enforce the BIP94
   timewarp floor (testnet4). The first block of a retarget period may carry
   a timestamp more than 600 s before its parent. Core rejects it
