@@ -4,7 +4,7 @@
 //! `docs/sv2-template-provider.md`.
 
 mod job;
-pub mod messages;
+mod messages;
 mod session;
 mod template;
 pub mod testutil;
