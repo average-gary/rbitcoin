@@ -1,5 +1,6 @@
 //! One TDP session: Noise handshake, `SetupConnection`, then TDP messages.
 
+use crate::messages::REQUIRES_JOB_VALIDATION;
 use crate::template;
 use crate::transport::{Frame, NoiseConn, NoiseWriter};
 use crate::Sv2TpStats;
@@ -527,8 +528,9 @@ fn setup_error(m: &SetupConnection) -> Option<(u32, &'static str)> {
     if !(m.min_version..=m.max_version).contains(&TDP_VERSION) {
         return Some((0, ERROR_CODE_SETUP_CONNECTION_PROTOCOL_VERSION_MISMATCH));
     }
-    // TDP defines no SetupConnection flags: every set bit is unsupported.
-    if m.flags != 0 {
+    // sv2-job-validation-draft §3 defines bit 0; every other set bit is
+    // unsupported.
+    if m.flags & !REQUIRES_JOB_VALIDATION != 0 {
         return Some((
             m.flags,
             ERROR_CODE_SETUP_CONNECTION_UNSUPPORTED_FEATURE_FLAGS,
@@ -557,7 +559,7 @@ async fn on_setup(conn: &mut NoiseConn, mut frame: Frame) -> io::Result<bool> {
     }
     let reply = SetupConnectionSuccess {
         used_version: TDP_VERSION,
-        flags: 0,
+        flags: setup.flags,
     };
     conn.send(MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, reply)
         .await?;
