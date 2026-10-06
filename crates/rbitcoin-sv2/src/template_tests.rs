@@ -1,6 +1,11 @@
+use crate::messages::{
+    ValidateCustomJob, ValidateCustomJobSuccess, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB,
+    MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS, REQUIRES_JOB_VALIDATION,
+};
 use crate::test_chain::{padded_chain_with, shared_regtest, TestChain};
 use crate::testutil::TpClient;
 use crate::{run_sv2_tp, Sv2TpConfig, FEE_DELTA, SETUP_TIMEOUT, TEMPLATE_INTERVAL, WRITE_TIMEOUT};
+use binary_sv2::{Seq064K, B016M, B064K, U256};
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::{sha256d, Hash};
 use bitcoin::{
@@ -18,7 +23,8 @@ use rbitcoin_store::merkle_root_from_txids;
 use std::sync::Arc;
 use std::time::Duration;
 use template_distribution_sv2::{
-    NewTemplate, SetNewPrevHash, MESSAGE_TYPE_NEW_TEMPLATE, MESSAGE_TYPE_SET_NEW_PREV_HASH,
+    NewTemplate, RequestTransactionDataSuccess, SetNewPrevHash, MESSAGE_TYPE_NEW_TEMPLATE,
+    MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS, MESSAGE_TYPE_SET_NEW_PREV_HASH,
 };
 
 const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
@@ -1096,5 +1102,172 @@ async fn idle_session_checks_each_interval_and_does_not_rebuild() {
     );
     assert_eq!(stats.builds.totals().0, 1, "an idle mempool is not rebuilt");
     drop(c);
+    tp.shutdown().await;
+}
+
+/// A live TP on `tc` with one session past `SetupConnection(flags)`.
+async fn connect_tp(tc: &TestChain, flags: u32) -> (crate::Sv2TpHandle, TpClient) {
+    let tp = run_sv2_tp(Sv2TpConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        chain: Arc::clone(&tc.chain),
+        authority_secret: [7; 32],
+        cert_validity: Duration::from_secs(3600),
+        stale_grace: Duration::from_secs(10),
+        setup_timeout: SETUP_TIMEOUT,
+        write_timeout: WRITE_TIMEOUT,
+        fee_delta: FEE_DELTA,
+        template_interval: TEMPLATE_INTERVAL,
+    })
+    .await
+    .expect("listen");
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, flags).await.unwrap();
+    c.recv().await.expect("setup reply");
+    (tp, c)
+}
+
+/// A JDS-shaped placeholder coinbase: BIP34 height then 8 extranonce bytes,
+/// one payout, and the witness commitment over `txs` with a zero reserved
+/// value in the witness.
+fn job_coinbase(height: u32, payout: u64, txs: &[&Transaction]) -> Transaction {
+    let mut script_sig = bip34_height_script(height);
+    script_sig.extend_from_slice(&[0u8; 8]);
+    Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(script_sig),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[[0u8; 32]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(payout),
+                script_pubkey: ScriptBuf::from_bytes(vec![OP_TRUE]),
+            },
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(witness_commitment_script(
+                    txs.iter().map(|tx| tx.compute_wtxid().to_byte_array()),
+                    &[0u8; 32],
+                )),
+            },
+        ],
+    }
+}
+
+/// One `ValidateCustomJob` as owned fields, so a test can bend any of them.
+struct Job {
+    request_id: u32,
+    prev_hash: [u8; 32],
+    version: u32,
+    coinbase: Vec<u8>,
+    wtxids: Vec<[u8; 32]>,
+    supplied: Vec<Vec<u8>>,
+}
+
+impl Job {
+    fn on_tip(
+        tc: &TestChain,
+        request_id: u32,
+        coinbase: &Transaction,
+        declared: &[&Transaction],
+    ) -> Self {
+        Job {
+            request_id,
+            prev_hash: tc
+                .chain
+                .tip_header()
+                .expect("tip")
+                .block_hash()
+                .to_byte_array(),
+            version: tc.chain.gbt_block_version() as u32,
+            coinbase: serialize(coinbase),
+            wtxids: declared
+                .iter()
+                .map(|tx| tx.compute_wtxid().to_byte_array())
+                .collect(),
+            supplied: Vec::new(),
+        }
+    }
+
+    async fn send(&self, c: &mut TpClient) {
+        let msg = ValidateCustomJob {
+            request_id: self.request_id,
+            prev_hash: U256::from(&self.prev_hash),
+            version: self.version,
+            coinbase_tx: B064K::try_from(&self.coinbase[..]).unwrap(),
+            wtxid_list: Seq064K::new(self.wtxids.iter().map(U256::from).collect()).unwrap(),
+            transaction_list: Seq064K::new(
+                self.supplied
+                    .iter()
+                    .map(|t| B016M::try_from(&t[..]).unwrap())
+                    .collect(),
+            )
+            .unwrap(),
+        };
+        c.send(MESSAGE_TYPE_VALIDATE_CUSTOM_JOB, msg).await.unwrap();
+    }
+}
+
+async fn expect_job_success(c: &mut TpClient) -> ValidateCustomJobSuccess {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS,
+        "{:?}",
+        f.payload
+    );
+    binary_sv2::from_bytes(&mut f.payload).expect("decode")
+}
+
+/// The retained job answers `RequestTransactionData` with the declared txs
+/// in block order, exactly like a built template.
+async fn expect_retained(c: &mut TpClient, template_id: u64, txs: &[&Transaction]) {
+    c.request_transaction_data(template_id).await.unwrap();
+    let mut f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_SUCCESS);
+    let d: RequestTransactionDataSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(d.template_id, template_id);
+    let got: Vec<Vec<u8>> = d
+        .transaction_list
+        .iter()
+        .map(|t| t.as_ref().to_vec())
+        .collect();
+    let want: Vec<Vec<u8>> = txs.iter().map(serialize).collect();
+    assert_eq!(got, want, "retained txs in declared order");
+}
+
+/// docs/sv2-job-validation.md §4.1–4.3: a job on the tip whose txs are all
+/// in the mempool and whose coinbase pays subsidy + fees is answered
+/// `Success` with the next template id and the declared fee sum, and is
+/// retained like a template.
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_custom_job_prices_and_retains_the_declared_job() {
+    let tc = shared_regtest(2);
+    mock_live_tip(&tc);
+    let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
+    let a = spend(tc.coinbases[0], 3_000, cheap.clone());
+    let b = spend(tc.coinbases[1], 2_000, cheap);
+    for tx in [&a, &b] {
+        tc.mempool.accept_tx(tx).expect("mempool accept");
+    }
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    c.coinbase_output_constraints(0, 0).await.unwrap();
+    let last = expect_template(&mut c, &tc, &[&a, &b], true).await;
+
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
+    Job::on_tip(&tc, 9, &coinbase, &[&a, &b]).send(&mut c).await;
+    let ok = expect_job_success(&mut c).await;
+    assert_eq!(
+        (ok.request_id, ok.template_id, ok.fees),
+        (9, last + 1, 5_000)
+    );
+    expect_retained(&mut c, ok.template_id, &[&a, &b]).await;
+
     tp.shutdown().await;
 }
