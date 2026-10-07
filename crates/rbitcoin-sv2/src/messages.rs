@@ -1,23 +1,23 @@
 //! Job-validation extension to TDP (`docs/sv2-job-validation.md` §3–5):
-//! the `SetupConnection` flag and the four `ValidateCustomJob` messages a
+//! the `SetupConnection` flag and the four `ProposeTemplate` messages a
 //! Job Declarator Server uses to have this TP check a custom job.
 
 use binary_sv2::{Deserialize, Seq064K, Serialize, Str0255, B016M, B064K, U256};
 
 /// `SetupConnection.flags` bit 0: the client intends to send
-/// [`ValidateCustomJob`]. The only TDP flag this TP accepts.
+/// [`ProposeTemplate`]. The only TDP flag this TP accepts.
 pub(crate) const REQUIRES_JOB_VALIDATION: u32 = 1 << 0;
 
-pub(crate) const MESSAGE_TYPE_VALIDATE_CUSTOM_JOB: u8 = 0x77;
-pub(crate) const MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_MISSING_TRANSACTIONS: u8 = 0x78;
-pub(crate) const MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_SUCCESS: u8 = 0x79;
-pub(crate) const MESSAGE_TYPE_VALIDATE_CUSTOM_JOB_ERROR: u8 = 0x7a;
+pub(crate) const MESSAGE_TYPE_PROPOSE_TEMPLATE: u8 = 0x77;
+pub(crate) const MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS: u8 = 0x78;
+pub(crate) const MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS: u8 = 0x79;
+pub(crate) const MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR: u8 = 0x7a;
 
 /// Client → TP: is this custom job a consensus-valid block on the TP tip?
 /// `transaction_list` carries the txs a prior
-/// [`ValidateCustomJobMissingTransactions`] asked for, in that order.
+/// [`ProposeTemplateMissingTransactions`] asked for, in that order.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidateCustomJob<'decoder> {
+pub(crate) struct ProposeTemplate<'decoder> {
     pub request_id: u32,
     pub prev_hash: U256<'decoder>,
     pub version: u32,
@@ -28,7 +28,7 @@ pub(crate) struct ValidateCustomJob<'decoder> {
 
 /// TP → client: 0-indexed positions in `wtxid_list` the TP cannot resolve.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidateCustomJobMissingTransactions<'decoder> {
+pub(crate) struct ProposeTemplateMissingTransactions<'decoder> {
     pub request_id: u32,
     pub unknown_tx_position_list: Seq064K<'decoder, u16>,
 }
@@ -36,7 +36,7 @@ pub(crate) struct ValidateCustomJobMissingTransactions<'decoder> {
 /// TP → client: the job is valid and retained under `template_id`, which
 /// shares the `NewTemplate.template_id` namespace.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidateCustomJobSuccess {
+pub(crate) struct ProposeTemplateSuccess {
     pub request_id: u32,
     pub template_id: u64,
     pub fees: u64,
@@ -44,7 +44,7 @@ pub(crate) struct ValidateCustomJobSuccess {
 
 /// TP → client: the job was not validated.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidateCustomJobError<'decoder> {
+pub(crate) struct ProposeTemplateError<'decoder> {
     pub request_id: u32,
     pub error_code: Str0255<'decoder>,
     pub error_details: B064K<'decoder>,
@@ -78,7 +78,7 @@ mod tests {
         let (coinbase, tx, details) = ([0xc0u8; 100], [0xeeu8; 300], [1u8, 2, 3]);
         let mut bytes = Vec::new();
         round_trip(
-            ValidateCustomJob {
+            ProposeTemplate {
                 request_id: 7,
                 prev_hash: U256::from(&h1),
                 version: 0x2000_0000,
@@ -90,7 +90,7 @@ mod tests {
         );
         let mut bytes = Vec::new();
         round_trip(
-            ValidateCustomJobMissingTransactions {
+            ProposeTemplateMissingTransactions {
                 request_id: 7,
                 unknown_tx_position_list: Seq064K::new(vec![0u16, 5, u16::MAX]).unwrap(),
             },
@@ -98,7 +98,7 @@ mod tests {
         );
         let mut bytes = Vec::new();
         round_trip(
-            ValidateCustomJobSuccess {
+            ProposeTemplateSuccess {
                 request_id: 7,
                 template_id: u64::MAX,
                 fees: 12_345,
@@ -107,7 +107,7 @@ mod tests {
         );
         let mut bytes = Vec::new();
         round_trip(
-            ValidateCustomJobError {
+            ProposeTemplateError {
                 request_id: 7,
                 error_code: Str0255::try_from("stale-prevhash").unwrap(),
                 error_details: B064K::try_from(&details[..]).unwrap(),
