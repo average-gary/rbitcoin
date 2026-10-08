@@ -63,6 +63,16 @@ const CONSTRAINTS_COOLDOWN: Duration = Duration::from_secs(1);
 /// session is closed so the slot goes back to a real client.
 const MAX_SUPERSEDED_CONSTRAINTS: u32 = 8;
 
+/// CPU and RAM trade (CONTRIBUTING 9): this many `ProposeTemplate`
+/// validations run at once per session, each one full proposal check on a
+/// blocking thread holding up to a block of decoded transactions. Later
+/// proposals wait in arrival order, each holding its payload (at most
+/// `MAX_PROPOSE_TEMPLATE_PAYLOAD`), and are not refused: a JDS declares one
+/// job per JDC at every tip change, so a burst is the normal shape. The
+/// queue has no cap of its own (docs/sv2-template-provider.md, Plan D
+/// risks).
+const MAX_INFLIGHT_VALIDATIONS: usize = 4;
+
 /// Fee-delta push settings (docs/sv2-template-provider.md C1).
 #[derive(Clone, Copy)]
 pub(crate) struct FeePush {
@@ -190,6 +200,8 @@ pub(crate) async fn serve(
         held_logged: false,
         fee_check_at: None,
         seen_updates: 0,
+        validations: JoinSet::new(),
+        queued: VecDeque::new(),
     };
     s.run(&mut frames, deadline).await
 }
@@ -227,6 +239,12 @@ struct Session {
     fee_check_at: Option<Instant>,
     /// `MempoolHub::template_updates` read before the last build.
     seen_updates: u64,
+    /// `ProposeTemplate` validations in flight, at most
+    /// `MAX_INFLIGHT_VALIDATIONS`. Dropping the set aborts them with the
+    /// session.
+    validations: JoinSet<io::Result<(u32, Verdict)>>,
+    /// Prechecked proposals waiting for a validation slot, oldest first.
+    queued: VecDeque<Vec<u8>>,
 }
 
 impl Session {
@@ -253,6 +271,11 @@ impl Session {
                     Ok(_) | Err(RecvError::Lagged(_)) => self.publish().await?,
                     Err(RecvError::Closed) => return Ok(()),
                 },
+                Some(done) = self.validations.join_next(), if !self.validations.is_empty() => {
+                    let (request_id, verdict) = done.map_err(io::Error::other)??;
+                    self.reply_propose(request_id, verdict).await?;
+                    self.start_validations();
+                }
                 _ = tokio::time::sleep_until(retire_at.unwrap_or_else(Instant::now)),
                     if retire_at.is_some() =>
                 {
@@ -321,7 +344,18 @@ impl Session {
             }
             MESSAGE_TYPE_SUBMIT_SOLUTION => self.on_submit_solution(frame).await?,
             MESSAGE_TYPE_PROPOSE_TEMPLATE if self.job_validation => {
-                self.on_propose_template(frame).await?;
+                let Some(m) = job::decode(&mut frame.payload) else {
+                    rbitcoin_log::info!("sv2: undecodable ProposeTemplate");
+                    return Ok(true);
+                };
+                let request_id = m.request_id;
+                if let Err(code) = job::precheck(&m) {
+                    self.reply_propose(request_id, Verdict::Rejected(code.into()))
+                        .await?;
+                    return Ok(true);
+                }
+                self.queued.push_back(frame.payload);
+                self.start_validations();
             }
             t => rbitcoin_log::info!("sv2: ignoring message {t:#x}"),
         }
@@ -536,20 +570,25 @@ impl Session {
         Ok(())
     }
 
+    /// Fill the validation slots from the queue, oldest first. Other frames
+    /// and the loop's timers run while a validation is in flight; the reply
+    /// comes from the `join_next` arm, paired by `request_id`.
+    fn start_validations(&mut self) {
+        while self.validations.len() < MAX_INFLIGHT_VALIDATIONS {
+            let Some(payload) = self.queued.pop_front() else {
+                return;
+            };
+            let c = Arc::clone(&self.chain);
+            self.validations.spawn_blocking(move || {
+                let _g = BlockingRegion::enter();
+                job::validate(&c, payload)
+            });
+        }
+    }
+
     /// docs/sv2-job-validation.md §4: a valid job is retained under the next
     /// template id and answered `Success`; a rejected one answers `Error`.
-    async fn on_propose_template(&mut self, frame: Frame) -> io::Result<()> {
-        let c = Arc::clone(&self.chain);
-        let verdict = tokio::task::spawn_blocking(move || {
-            let _g = BlockingRegion::enter();
-            job::validate(&c, frame.payload)
-        })
-        .await
-        .map_err(io::Error::other)??;
-        let Some((request_id, verdict)) = verdict else {
-            rbitcoin_log::info!("sv2: undecodable ProposeTemplate");
-            return Ok(());
-        };
+    async fn reply_propose(&mut self, request_id: u32, verdict: Verdict) -> io::Result<()> {
         let wire = |e: binary_sv2::Error| io::Error::other(format!("sv2 ProposeTemplate: {e:?}"));
         match verdict {
             Verdict::Missing(positions) => {
