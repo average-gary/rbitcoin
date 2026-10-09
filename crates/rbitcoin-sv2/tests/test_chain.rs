@@ -6,8 +6,8 @@ use rbitcoin_primitives::Height;
 use rbitcoin_query::testutil::{tiny_query_labeled, TempDir};
 use rbitcoin_query::{accept_and_connect_block, pad_empty_from};
 use rbitcoin_sv2::{
-    Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, SETUP_TIMEOUT, TEMPLATE_INTERVAL,
-    WRITE_TIMEOUT,
+    Sv2TpConfig, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, PROVIDE_TIMEOUT, SETUP_TIMEOUT,
+    TEMPLATE_INTERVAL, WRITE_TIMEOUT,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -24,6 +24,7 @@ pub(crate) fn test_tp_config(chain: Arc<ChainHub>, authority_secret: [u8; 32]) -
         setup_timeout: SETUP_TIMEOUT,
         idle_timeout: None,
         write_timeout: WRITE_TIMEOUT,
+        provide_timeout: PROVIDE_TIMEOUT,
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
