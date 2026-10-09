@@ -173,8 +173,10 @@ pub(crate) fn next_header_on(chain: &ChainHub, prev: [u8; 32]) -> io::Result<Opt
         return Ok(None);
     };
     let next = next_header_at(chain, tip)?;
-    Ok((next.prev_hash == prev && !time_too_new(next.time, chain.clock.now_secs()))
-        .then_some(next))
+    Ok(
+        (next.prev_hash == prev && !time_too_new(next.time, chain.clock.now_secs()))
+            .then_some(next),
+    )
 }
 
 /// `template_prev` plus the bits and time a template on that tip would use.

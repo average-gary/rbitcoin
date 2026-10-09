@@ -16,13 +16,17 @@ use rbitcoin_primitives::Height;
 use rbitcoin_query::{confirm_scripts_phase, expected_next_bits, median_time_past};
 use rbitcoin_store::merkle_root_from_txids;
 use rbitcoin_sv2::messages::{
-    ProposeTemplate, ProposeTemplateError, ProposeTemplateMissingTransactions,
-    ProposeTemplateSuccess, MESSAGE_TYPE_PROPOSE_TEMPLATE, MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR,
-    MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+    ProposeTemplate, ProposeTemplateError, ProposeTemplateSuccess, ProvideMissingTransactions,
+    ProvideMissingTransactionsSuccess, MESSAGE_TYPE_PROPOSE_TEMPLATE,
+    MESSAGE_TYPE_PROPOSE_TEMPLATE_ERROR, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS,
+    MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS,
     REQUIRES_JOB_VALIDATION,
 };
+use rbitcoin_sv2::session::MAX_PENDING_PROPOSALS;
 use rbitcoin_sv2::testutil::{solution_coinbase, TpClient};
-use rbitcoin_sv2::{run_sv2_tp, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, TEMPLATE_INTERVAL};
+use rbitcoin_sv2::{
+    run_sv2_tp, CONSTRAINTS_COOLDOWN_TEST, FEE_DELTA, PROVIDE_TIMEOUT, TEMPLATE_INTERVAL,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -478,7 +482,7 @@ async fn first_template_every(
     template_interval: Duration,
 ) -> FirstTemplate {
     mock_live_tip(tc);
-    let (tp, mut c) = connect_tp_every(tc, flags, template_interval).await;
+    let (tp, mut c) = connect_tp_with(tc, flags, template_interval, PROVIDE_TIMEOUT).await;
     c.coinbase_output_constraints(0, 0).await.unwrap();
 
     let mut f = recv_in_time(&mut c).await;
@@ -1342,18 +1346,21 @@ async fn submit_solution_past_the_min_diff_gap_is_dropped() {
 
 /// A live TP on `tc` with one session past `SetupConnection(flags)`.
 async fn connect_tp(tc: &TestChain, flags: u32) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
-    connect_tp_every(tc, flags, TEMPLATE_INTERVAL).await
+    connect_tp_with(tc, flags, TEMPLATE_INTERVAL, PROVIDE_TIMEOUT).await
 }
 
-/// [`connect_tp`] on a TP that checks fees every `template_interval`.
-async fn connect_tp_every(
+/// [`connect_tp`] on a TP that checks fees every `template_interval` and
+/// holds a proposal waiting for its missing txs for `provide_timeout`.
+async fn connect_tp_with(
     tc: &TestChain,
     flags: u32,
     template_interval: Duration,
+    provide_timeout: Duration,
 ) -> (rbitcoin_sv2::Sv2TpHandle, TpClient) {
     let tp = run_sv2_tp({
         let mut cfg = test_tp_config(Arc::clone(&tc.chain), [7; 32]);
         cfg.template_interval = template_interval;
+        cfg.provide_timeout = provide_timeout;
         cfg
     })
     .await
@@ -1411,7 +1418,6 @@ struct Job {
     coinbase_prefix: Vec<u8>,
     coinbase_suffix: Vec<u8>,
     wtxids: Vec<[u8; 32]>,
-    supplied: Vec<Vec<u8>>,
 }
 
 impl Job {
@@ -1434,7 +1440,6 @@ impl Job {
                 .iter()
                 .map(|tx| tx.compute_wtxid().to_byte_array())
                 .collect(),
-            supplied: Vec::new(),
         }
     }
 
@@ -1446,16 +1451,39 @@ impl Job {
             coinbase_tx_suffix: B064K::try_from(&self.coinbase_suffix[..]).unwrap(),
             wtxid_list: Seq064K::new(self.wtxids.iter().map(U256::from).collect()).unwrap(),
             excess_data: B064K::try_from(&[][..]).unwrap(),
-            transaction_list: Seq064K::new(
-                self.supplied
-                    .iter()
-                    .map(|t| B016M::try_from(&t[..]).unwrap())
-                    .collect(),
-            )
-            .unwrap(),
         };
         c.send(MESSAGE_TYPE_PROPOSE_TEMPLATE, msg).await.unwrap();
     }
+}
+
+/// The TP asks for `positions` of `request_id`'s `wtxid_list`.
+async fn expect_missing(c: &mut TpClient, request_id: u32, positions: &[u16]) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(
+        f.msg_type, MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS,
+        "{:?}",
+        f.payload
+    );
+    let m: ProvideMissingTransactions = binary_sv2::from_bytes(&mut f.payload).expect("decode");
+    assert_eq!(m.request_id, request_id);
+    assert_eq!(m.unknown_tx_position_list.into_inner(), positions);
+}
+
+/// The JDS leg of the round trip: `txs` as the JDC serialized them, under
+/// the `request_id` the TP asked with.
+async fn provide(c: &mut TpClient, request_id: u32, txs: &[Vec<u8>]) {
+    let msg = ProvideMissingTransactionsSuccess {
+        request_id,
+        transaction_list: Seq064K::new(
+            txs.iter()
+                .map(|t| B016M::try_from(&t[..]).unwrap())
+                .collect(),
+        )
+        .unwrap(),
+    };
+    c.send(MESSAGE_TYPE_PROVIDE_MISSING_TRANSACTIONS_SUCCESS, msg)
+        .await
+        .unwrap();
 }
 
 async fn expect_job_error(c: &mut TpClient, request_id: u32, code: &str) {
@@ -1588,40 +1616,102 @@ async fn propose_template_asks_for_and_accepts_missing_transactions() {
     mock_live_tip(&tc);
     let cheap = ScriptBuf::from_bytes(vec![OP_TRUE]);
     let a = spend(tc.coinbases[0], 3_000, cheap.clone());
-    let b = spend(tc.coinbases[1], 2_000, cheap);
+    let b = spend(tc.coinbases[1], 2_000, cheap.clone());
+    // Decodable and unknown to the mempool, like `b`; never validated.
+    let sibling = spend(tc.coinbases[1], 2_500, cheap);
     tc.mempool.admit(&a).expect("mempool accept");
-    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+    let provide_timeout = Duration::from_secs(1);
+    let (tp, mut c) = connect_tp_with(
+        &tc,
+        REQUIRES_JOB_VALIDATION,
+        TEMPLATE_INTERVAL,
+        provide_timeout,
+    )
+    .await;
     c.coinbase_output_constraints(0, 0).await.unwrap();
     let last = expect_template(&mut c, &tc, &[&a], true).await;
 
     let height = tc.chain.query.tip_height().unwrap().0 + 1;
     let subsidy = block_subsidy(height, &tc.chain.params) as u64;
     let coinbase = job_coinbase(height, subsidy + 5_000, &[&a, &b]);
-    let mut job = Job::declare(&tc, 4, &coinbase, &[&a, &b]);
-    job.send(&mut c).await;
-    let mut f = recv_in_time(&mut c).await;
-    assert_eq!(
-        f.msg_type,
-        MESSAGE_TYPE_PROPOSE_TEMPLATE_MISSING_TRANSACTIONS
-    );
-    let m: ProposeTemplateMissingTransactions =
-        binary_sv2::from_bytes(&mut f.payload).expect("decode");
-    assert_eq!(m.request_id, 4);
-    assert_eq!(m.unknown_tx_position_list.into_inner(), vec![1u16]);
+    let raw_b = serialize(&b);
 
-    job.supplied = vec![serialize(&b)];
+    provide(&mut c, 77, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 77, "unknown-request-id").await;
+
+    let job = Job::declare(&tc, 4, &coinbase, &[&a, &b]);
     job.send(&mut c).await;
+    expect_missing(&mut c, 4, &[1]).await;
+    job.send(&mut c).await;
+    expect_job_error(&mut c, 4, "duplicate-request-id").await;
+    provide(&mut c, 4, std::slice::from_ref(&raw_b)).await;
     expect_job_success(&mut c, &tc, 4, last + 1, 5_000).await;
     expect_retained(&mut c, last + 1, &[&a, &b]).await;
+    provide(&mut c, 4, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 4, "unknown-request-id").await;
+
+    Job::declare(&tc, 5, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 5, &[1]).await;
+    provide(&mut c, 5, &[serialize(&a)]).await;
+    expect_job_error(&mut c, 5, "bad-missing-tx").await;
+    provide(&mut c, 5, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 5, "unknown-request-id").await;
+
+    Job::declare(&tc, 6, &coinbase, &[&a, &b, &sibling])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 6, &[1, 2]).await;
+    provide(&mut c, 6, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 6, "bad-missing-tx").await;
+    provide(&mut c, 6, &[raw_b.clone(), serialize(&sibling)]).await;
+    expect_job_error(&mut c, 6, "unknown-request-id").await;
+
+    let blob = vec![0xee; 40];
+    let mut garbage = Job::declare(&tc, 8, &coinbase, &[]);
+    garbage.wtxids = vec![sha256d::Hash::hash(&blob).to_byte_array()];
+    garbage.send(&mut c).await;
+    expect_missing(&mut c, 8, &[0]).await;
+    provide(&mut c, 8, &[blob]).await;
+    expect_job_error(&mut c, 8, "bad-missing-tx").await;
+
+    for id in 10..10 + MAX_PENDING_PROPOSALS as u32 + 1 {
+        Job::declare(&tc, id, &coinbase, &[&a, &b])
+            .send(&mut c)
+            .await;
+        expect_missing(&mut c, id, &[1]).await;
+    }
+    provide(&mut c, 10, std::slice::from_ref(&raw_b)).await;
+    expect_job_error(&mut c, 10, "unknown-request-id").await;
+    provide(&mut c, 11, std::slice::from_ref(&raw_b)).await;
+    expect_job_success(&mut c, &tc, 11, last + 2, 5_000).await;
+
+    Job::declare(&tc, 7, &coinbase, &[&a, &b])
+        .send(&mut c)
+        .await;
+    expect_missing(&mut c, 7, &[1]).await;
+    tokio::time::sleep(provide_timeout + provide_timeout / 2).await;
+    provide(&mut c, 7, &[raw_b]).await;
+    expect_job_error(&mut c, 7, "unknown-request-id").await;
+
+    c.request_transaction_data(last + 3).await.unwrap();
+    let mut f = recv_in_time(&mut c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+    let e: RequestTransactionDataError = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!(
+        e.error_code.as_utf8_or_hex(),
+        "template-id-not-found",
+        "only the two completed jobs took ids"
+    );
 
     tp.shutdown().await;
 }
 
 /// §4.1 and §4.4: everything in a job comes from a JDC. The checks run in
 /// order before any mempool lookup or transaction decode: a repeated wtxid
-/// or a supplied tx nobody declared is refused on arrival, even while the
-/// tip is stale (IBD) and every other job is `job-validation-unavailable`;
-/// then a declared blob that does not decode, a coinbase prefix that does
+/// is refused on arrival, even while the tip is stale (IBD) and every other
+/// job is `job-validation-unavailable`; then a coinbase prefix that does
 /// not parse or a coinbase that does not decode, then the proposal check's
 /// own reject string: a declaration from before the tip moved fails its
 /// BIP34 height, an overpaying coinbase its amount. Nothing is retained on
@@ -1657,18 +1747,6 @@ async fn propose_template_rejects_untrusted_input_in_order() {
         .send(&mut c)
         .await;
     expect_job_error(&mut c, 2, "duplicate-wtxid").await;
-
-    let mut undeclared = Job::declare(&tc, 3, &coinbase, &[&a]);
-    undeclared.supplied = vec![serialize(&b)];
-    undeclared.send(&mut c).await;
-    expect_job_error(&mut c, 3, "bad-missing-tx").await;
-
-    let blob = vec![0xee; 40];
-    let mut garbage = Job::declare(&tc, 4, &coinbase, &[]);
-    garbage.wtxids = vec![sha256d::Hash::hash(&blob).to_byte_array()];
-    garbage.supplied = vec![blob];
-    garbage.send(&mut c).await;
-    expect_job_error(&mut c, 4, "bad-missing-tx").await;
 
     // More scriptSig bytes than the length the prefix declares.
     let mut short_sig = Job::declare(&tc, 5, &coinbase, &[&a, &b]);
@@ -1769,19 +1847,23 @@ async fn submit_solution_for_a_validated_job_becomes_the_tip() {
     tp.shutdown().await;
 }
 
-/// A proposal's validation runs off the session loop. The proposal supplies
-/// a few hundred spends of one confirmed fan-out, so validating it is the
-/// costly frame (tens of milliseconds) while every template stays
-/// coinbase-only; the proposal alone measures that wall first. A
-/// `RequestTransactionData` sent right behind a second copy is answered
-/// before that copy's `Success`, in a small fraction of the validation it
-/// overlapped: the request has no blocking work behind it, so a slower
-/// answer would mean the loop waited on the validation and the order was
-/// luck. A `SubmitSolution` sent behind a third copy is accepted while that
-/// copy validates and pushes the solved tip's `NewTemplate`. Its accept ends
-/// in a tip write, so it is not ordered against the copy's reply, which is
-/// the straddle the plan names: `Success` on the tip the validation started
-/// on, or the proposal check's own reject once the tip moved first.
+/// A proposal's validation runs off the session loop. The proposal declares
+/// a few hundred spends of one confirmed fan-out that the mempool lacks, so
+/// each copy is asked for all of them and the costly frame (tens of
+/// milliseconds) is the `ProvideMissingTransactions.Success` that completes
+/// it, while every template stays coinbase-only; the first copy measures
+/// that wall. A `RequestTransactionData` sent right behind the second copy's
+/// provide is answered before that copy's `Success`, in a small fraction of
+/// the validation it overlapped: the request has no blocking work behind
+/// it, so a slower answer would mean the loop waited on the validation and
+/// the order was luck; a `ProposeTemplate` under the id in flight is refused
+/// `duplicate-request-id` on arrival the same way. A `SubmitSolution` sent
+/// behind the third copy's
+/// provide is accepted while that copy validates and pushes the solved
+/// tip's `NewTemplate`. Its accept ends in a tip write, so it is not ordered
+/// against the copy's reply, which is the straddle the plan names:
+/// `Success` on the tip the validation started on, or the proposal check's
+/// own reject once the tip moved first.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_template_validation_does_not_delay_other_frames() {
     let tc = shared_regtest(1);
@@ -1845,18 +1927,25 @@ async fn propose_template_validation_does_not_delay_other_frames() {
         &job_coinbase(height, subsidy + fees, &declared),
         &declared,
     );
-    // Supplied, not pooled: the templates stay coinbase-only.
-    job.supplied = spends.iter().map(serialize).collect();
+    // Provided, not pooled: the templates stay coinbase-only.
+    let supplied: Vec<Vec<u8>> = spends.iter().map(serialize).collect();
+    let all: Vec<u16> = (0..outs as u16).collect();
 
-    let asked = tokio::time::Instant::now();
     job.send(&mut c).await;
+    expect_missing(&mut c, 1, &all).await;
+    let asked = tokio::time::Instant::now();
+    provide(&mut c, 1, &supplied).await;
     expect_job_success(&mut c, &tc, 1, template_id + 1, fees).await;
     let alone = asked.elapsed();
 
     job.request_id = 2;
+    job.send(&mut c).await;
+    expect_missing(&mut c, 2, &all).await;
     let proposed = tokio::time::Instant::now();
+    provide(&mut c, 2, &supplied).await;
     job.send(&mut c).await;
     c.request_transaction_data(template_id).await.unwrap();
+    expect_job_error(&mut c, 2, "duplicate-request-id").await;
     let f = recv_in_time(&mut c).await;
     let requested = proposed.elapsed();
     assert_eq!(
@@ -1875,6 +1964,8 @@ async fn propose_template_validation_does_not_delay_other_frames() {
     }
     job.request_id = 3;
     job.send(&mut c).await;
+    expect_missing(&mut c, 3, &all).await;
+    provide(&mut c, 3, &supplied).await;
     c.submit_solution(template_id, version, header.time, header.nonce, &coinbase)
         .await
         .unwrap();
