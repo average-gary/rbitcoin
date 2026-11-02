@@ -286,6 +286,39 @@ async fn session_silent_after_constraints_is_dropped_at_the_idle_deadline() {
     tp.shutdown().await;
 }
 
+/// A session that set `REQUIRES_JOB_VALIDATION` is set up at
+/// `SetupConnection.Success`, so the opt-in idle deadline starts there and
+/// does not wait for `CoinbaseOutputConstraints` it may never send.
+#[tokio::test]
+async fn validation_only_session_silent_is_dropped_at_the_idle_deadline() {
+    let tc = shared_regtest(0);
+    let chain = Arc::clone(&tc.chain);
+    let idle_timeout = Duration::from_millis(300);
+    let tp = run_sv2_tp({
+        let mut cfg = test_tp_config(chain, [7; 32]);
+        cfg.idle_timeout = Some(idle_timeout);
+        cfg
+    })
+    .await
+    .expect("listen");
+
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(TDP, 2, 2, REQUIRES_JOB_VALIDATION)
+        .await
+        .unwrap();
+    expect_success(&mut c).await;
+
+    let closed =
+        tokio::time::timeout(idle_timeout * 10, async { while c.recv().await.is_ok() {} }).await;
+    assert!(
+        closed.is_ok(),
+        "a quiet validation-only session must be closed at the idle deadline"
+    );
+    tp.shutdown().await;
+}
+
 /// A client that floods requests and never reads jams the TP's writes; the
 /// write deadline must close the session instead of stalling it forever.
 #[tokio::test]
