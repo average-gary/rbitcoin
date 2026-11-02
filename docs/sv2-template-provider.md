@@ -148,8 +148,9 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   bound, and `duplicate-wtxid`. Then, on the blocking thread:
   `job-validation-unavailable` while `in_ibd()` (the template gate) or when
   the tip cannot be read (D15), `bad-cb-decode` (this TP's code; the draft
-  has none for an undecodable coinbase), while resolving `bad-blk-weight`
-  past the block limit and `bad-missing-tx` for a supplied blob that does not
+  has none for an undecodable coinbase), while resolving `bad-blk-length`
+  (stripped size times four over the weight limit) or `bad-blk-weight` past
+  the block limits and `bad-missing-tx` for a supplied blob that does not
   decode, then the proposal check's reject string (`bad-cb-amount` for an
   overpaying coinbase). `stale-prevhash` was dropped in D9. Only
   `duplicate-wtxid` and the admission refusals are decided before a node
