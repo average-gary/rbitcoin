@@ -2398,3 +2398,119 @@ async fn admission_byte_bound() {
     }
     a.tp.shutdown().await;
 }
+
+/// Proposal validations are bounded across the node, not per session, and a
+/// started validation keeps its permit when its session goes away. On a
+/// runtime with four blocking threads and the one permit the node computes
+/// for that pool, the mempool write lock is held so a validation blocks
+/// resolving a pooled body: of three sessions that each propose, one runs;
+/// the blocking pool still serves other work; the running validation's client
+/// drops and a new session's proposal still waits; and on release every live
+/// session gets its verdict and nothing is running.
+#[test]
+fn propose_template_validations_are_bounded_across_sessions() {
+    blocking_pool_runtime(4).block_on(node_wide_validation_bound());
+}
+
+/// Run until `cond` holds. The deadline only keeps a deadlock from hanging
+/// the suite; no assertion depends on it.
+async fn until(what: &str, mut cond: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("deadlock waiting for {what}"));
+}
+
+/// The session has handled every frame sent before this one.
+async fn synced(c: &mut TpClient) {
+    c.request_transaction_data(u64::MAX).await.unwrap();
+    let f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_REQUEST_TRANSACTION_DATA_ERROR);
+}
+
+/// A job-validation session that never sends `CoinbaseOutputConstraints`, so
+/// it builds no template and only its validations use the blocking pool.
+async fn connect_without_template(tp: &rbitcoin_sv2::Sv2TpHandle) -> TpClient {
+    let mut c = TpClient::connect(tp.local_addr, tp.authority_pubkey)
+        .await
+        .expect("handshake");
+    c.setup_connection(2, 2, 2, REQUIRES_JOB_VALIDATION)
+        .await
+        .unwrap();
+    c.recv().await.expect("setup reply");
+    c
+}
+
+async fn expect_success_for_request_1(c: &mut TpClient, fees: u64) {
+    let mut f = recv_in_time(c).await;
+    assert_eq!(f.msg_type, MESSAGE_TYPE_PROPOSE_TEMPLATE_SUCCESS);
+    let ok: ProposeTemplateSuccess = binary_sv2::from_bytes(&mut f.payload).unwrap();
+    assert_eq!((ok.request_id, ok.fees), (1, fees));
+}
+
+async fn node_wide_validation_bound() {
+    let tc = shared_regtest(1);
+    mock_live_tip(&tc);
+    let tp = run_sv2_tp({
+        let mut cfg = test_tp_config(Arc::clone(&tc.chain), [7; 32]);
+        cfg.template_interval = MAX_TEMPLATE_INTERVAL;
+        cfg.validation_permits = 1;
+        cfg
+    })
+    .await
+    .expect("listen");
+    let stats = tp.stats();
+    let known = spend(tc.coinbases[0], 3_000, ScriptBuf::from_bytes(vec![OP_TRUE]));
+    tc.mempool.accept_tx(&known).expect("mempool accept");
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let fees = 3_000;
+    let subsidy = block_subsidy(height, &tc.chain.params) as u64;
+    let job = Job::declare(
+        &tc,
+        1,
+        &job_coinbase(height, subsidy + fees, &[&known]),
+        &[&known],
+    );
+    let mut running = connect_without_template(&tp).await;
+    let mut b = connect_without_template(&tp).await;
+    let mut c = connect_without_template(&tp).await;
+    let hold = WriteHold::take(&tc.mempool).await;
+
+    job.send(&mut running).await;
+    synced(&mut running).await;
+    until("the first validation to start", || {
+        stats.validations_running() == 1
+    })
+    .await;
+    job.send(&mut b).await;
+    job.send(&mut c).await;
+    synced(&mut b).await;
+    synced(&mut c).await;
+    tokio::task::spawn_blocking(|| ()).await.unwrap();
+    assert_eq!(stats.validations_running(), 1, "one validation node-wide");
+
+    drop(running);
+    until("the running validation's session to end", || {
+        tp.sessions.lock().unwrap()[0].is_finished()
+    })
+    .await;
+    let mut d = connect_without_template(&tp).await;
+    job.send(&mut d).await;
+    synced(&mut d).await;
+    tokio::task::spawn_blocking(|| ()).await.unwrap();
+    assert_eq!(
+        stats.validations_running(),
+        1,
+        "the permit stays with the started work"
+    );
+
+    hold.release();
+    for client in [&mut b, &mut c, &mut d] {
+        expect_success_for_request_1(client, fees).await;
+    }
+    assert_eq!(stats.validations_running(), 0);
+    tp.shutdown().await;
+}
