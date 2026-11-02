@@ -441,6 +441,17 @@ async fn out_of_range_timing_refuses_to_start() {
         .expect("out-of-range config must not start");
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
     }
+    for validation_permits in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+        let e = run_sv2_tp({
+            let mut cfg = test_tp_config(Arc::clone(&chain), [7; 32]);
+            cfg.validation_permits = validation_permits;
+            cfg
+        })
+        .await
+        .err()
+        .expect("out-of-range validation permits must not start");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+    }
     let e = run_sv2_tp({
         let mut cfg = test_tp_config(chain, [7; 32]);
         cfg.cert_validity = hour;

@@ -28,6 +28,7 @@ pub(crate) fn test_tp_config(chain: Arc<ChainHub>, authority_secret: [u8; 32]) -
         fee_delta: FEE_DELTA,
         template_interval: TEMPLATE_INTERVAL,
         constraints_cooldown: CONSTRAINTS_COOLDOWN_TEST,
+        validation_permits: 4,
     }
 }
 
