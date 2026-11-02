@@ -68,17 +68,16 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
 
 ### D3 — Client frame cap per message type
 
-- **Contract:** the client frame cap in
-  [`operator/interfaces.md`](./operator/interfaces.md#stratum-v2-template-provider), per
-  type. `ProposeTemplate` may carry a block's worth of transactions;
-  every other client type still closes past 65557 bytes.
+- **Contract:** the [Constraints](#constraints-all-plans) frame cap, per
+  type (D3 first capped `ProposeTemplate` at a block's worth of
+  transactions; D12 moved that cap to the provide and D18 made the cap
+  follow negotiation).
 - **Red:** `oversized_client_frame_closes_the_session` — a 200 KiB
   `ProposeTemplate` keeps the session, a 200 KiB `SubmitSolution` and a
   `ProposeTemplate` over its cap close it.
 - **Green:** `FrameCap { max_frame, payload: fn(u8) -> usize }`: read
   against the largest client message, apply the per-type cap once whole.
-- **RAM trade:** one in-flight client frame of ≤ ~6.5 MB per session,
-  ≤ ~52 MB at `MAX_SESSIONS`.
+- **RAM trade:** see [Constraints](#constraints-all-plans).
 
 ### D4 — ProposeTemplate happy path
 
@@ -219,7 +218,7 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   placeholder assembly ahead of the coinbase decode; the request
   `prev_hash` comparison dropped; `Success.prev_hash` from the retained
   job's header. `MAX_PROPOSE_TEMPLATE_PAYLOAD` re-priced for three
-  `B064K` fields (~6.5 MB).
+  `B064K` fields (~2.3 MB).
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
 
 ### D10 — Return `fees` in `Success`; retain jobs like templates
@@ -343,8 +342,8 @@ stratum-mining/sv2-tp PR #137. Ships no flag: a session opts in with
   into the retire timer, `Session.ids` for the ids queued, in flight, or held (D13);
   `Work { proposal, supplied }` through the FIFO and the `JoinSet`; the two
   payload caps in `transport.rs`.
-- **RAM trade:** ≤ 8 × ~2.2 MiB held per session, no transactions; one
-  in-flight client frame ≤ ~4.2 MB, ≤ ~34 MB at `MAX_SESSIONS`.
+- **RAM trade:** ≤ 8 × ~2.2 MiB held per session, no transactions; client
+  frame buffering as in [Constraints](#constraints-all-plans).
 - **Verify:** `cargo test -p rbitcoin-sv2 --lib`.
 
 ### D13 — Bounded admission
@@ -570,6 +569,30 @@ Three review findings on the hold and the retained ring, one rule each.
   validated on the new tip stays, and constraints sent afterwards get
   `NewTemplate(future=true)` and `SetNewPrevHash`.
 - **Verify:** `cargo test -p rbitcoin-sv2 --test suite validation_only`.
+
+### D18 — The client frame cap follows negotiation
+
+- **Contract:** the reader's frame cap is the pre-feature
+  `MAX_CLIENT_PAYLOAD` until `SetupConnection.Success` carries
+  `REQUIRES_JOB_VALIDATION`, and for a session without that flag; only a
+  negotiated session reads up to the `ProposeTemplate` and provide caps
+  (see [Constraints](#constraints-all-plans) for the numbers and the
+  buffering). The first post-Noise read, `SetupConnection`, is under the
+  small cap too.
+- **Red:** `reader_before_negotiation_refuses_a_frame_over_the_pre_feature_cap`
+  (a `recv` on the accept side of a real Noise socket read a
+  `ProposeTemplate`-typed frame one byte over the cap);
+  `unflagged_session_reads_frames_up_to_the_pre_feature_cap` (a session
+  without the flag stayed open for a `ProposeTemplate` over the old cap).
+  `frame_over_the_pre_feature_cap_before_setup_closes_the_session` closed
+  before this change too, after buffering the frame; it pins the outcome.
+  `flagged_session_reads_the_job_validation_pair_up_to_their_caps` was
+  green throughout and pins a max-size `ProposeTemplate` and provide read
+  and one byte over each closed. `oversized_client_frame_closes_the_session`
+  is replaced by these.
+- **Green:** `FrameCap::CLIENT` starts at the old cap;
+  `NoiseReader::allow_job_validation` raises `max_frame`, called from
+  `serve` before `into_split`. No second Noise reader.
 
 ### Test budget
 
