@@ -375,7 +375,11 @@ id that `SubmitSolution` accepts, naming the tip it validated on. The check
 is every consensus rule for a block except proof of work and the merkle
 root, including a script check of every non-coinbase transaction, the ones
 resolved from the mempool and the ones the JDS supplied alike, and no policy
-(standardness, relay fee) check. A repeated request id, a job past the
+(standardness, relay fee) check. On a chain that enforces BIP 54 the declared
+coinbase needs the locktime and sequence `NewTemplate` carries, or the job is
+answered `bad-cb-locktime` or `bad-cb-sequence`. While the next block's time
+floor is past the two-hour future limit, when the node sends no template, a job
+is answered `time-too-new`. A repeated request id, a job past the
 admission bound below, and a repeated wtxid are refused as the frame arrives,
 before any chain read; a provide that does not cover what was asked, or
 carries a transaction nobody asked for, is refused before any of it is

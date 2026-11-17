@@ -678,6 +678,16 @@ Three review findings on the hold and the retained ring, one rule each.
   accepted and echoed.
 - **Green:** the mask in `setup_error`.
 
+### D20 — BIP 54 coinbase and the future-time limit, pinned
+
+- **Contract:** no new wire behavior. The proposal check already refuses a
+  declared coinbase without the BIP 54 locktime and sequence
+  (`bad-cb-locktime`, `bad-cb-sequence`) and a job whose time passes the
+  future limit (`time-too-new`), the case where the session sends no
+  template (Core bitcoin/bitcoin#36192).
+- **Pin:** `propose_template_requires_the_bip54_coinbase_timelock`,
+  `propose_template_is_refused_while_the_next_block_floor_is_past_the_future_limit`.
+
 ### Test budget
 
 Units: the messages round trip, `job::extranonce_len` and `job::wire_code`,
