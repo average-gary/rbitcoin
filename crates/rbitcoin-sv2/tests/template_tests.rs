@@ -2589,6 +2589,75 @@ async fn validation_only_session_validates_and_solves_past_the_setup_timeout() {
     tp.shutdown().await;
 }
 
+/// A declared coinbase on a chain that enforces BIP 54 gets the proposal
+/// check's verdict: the locktime and sequence `NewTemplate` carries are
+/// required, and a coinbase without them is refused with the reason a block
+/// would get.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_requires_the_bip54_coinbase_timelock() {
+    let mut params = ChainParams::regtest();
+    params.enforce_bip54 = true;
+    let tc = padded_chain_with("sv2-bip54-job", 0, params);
+    let mut first = tc
+        .chain
+        .assemble_block_to_script(ScriptBuf::from_bytes(vec![0x51]), vec![])
+        .unwrap();
+    first.txdata[0].input[0].sequence = Sequence::ENABLE_LOCKTIME_NO_RBF;
+    first.header.merkle_root = first.compute_merkle_root().unwrap();
+    rbitcoin_consensus::grind_regtest_pow(&mut first.header);
+    tc.chain.accept_block(first).expect("height 1");
+    let FirstTemplate {
+        tp,
+        mut c,
+        template_id: last,
+        ..
+    } = first_template(&tc, REQUIRES_JOB_VALIDATION).await;
+
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let mut coinbase = job_coinbase(height, block_subsidy(height, &tc.chain.params) as u64, &[]);
+    Job::declare(&tc, 1, &coinbase, &[]).send(&mut c).await;
+    expect_job_error(&mut c, 1, "bad-cb-locktime").await;
+
+    coinbase.lock_time = LockTime::from_consensus(height - 1);
+    Job::declare(&tc, 2, &coinbase, &[]).send(&mut c).await;
+    expect_job_error(&mut c, 2, "bad-cb-sequence").await;
+
+    coinbase.input[0].sequence = Sequence::ENABLE_LOCKTIME_NO_RBF;
+    Job::declare(&tc, 3, &coinbase, &[]).send(&mut c).await;
+    expect_job_success(&mut c, &tc, 3, last + 1, 0).await;
+    tp.shutdown().await;
+}
+
+/// Core bitcoin/bitcoin#36192: with six blocks at the two-hour future limit
+/// the next block's floor is past it. The template session holds (see
+/// `template_holds_while_the_next_block_floor_is_past_the_future_limit`); a
+/// declared job is answered `time-too-new`, as a block would be, and one
+/// second later it validates.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_template_is_refused_while_the_next_block_floor_is_past_the_future_limit() {
+    let tc = padded_chain_with("sv2-future-floor-job", 100, ChainParams::regtest());
+    let now = tc.tip_time + 100_000;
+    let limit = now + 7_200;
+    tc.chain.clock.set_mock(i64::from(now));
+    let mut prev = tc.chain.tip_header().expect("tip").block_hash();
+    for h in 101..=106u32 {
+        let block = mine_empty_regtest(prev, limit, h);
+        prev = block.block_hash();
+        tc.chain.accept_block(block).expect("accept");
+    }
+    let (tp, mut c) = connect_tp(&tc, REQUIRES_JOB_VALIDATION).await;
+
+    let height = tc.chain.query.tip_height().unwrap().0 + 1;
+    let coinbase = job_coinbase(height, block_subsidy(height, &tc.chain.params) as u64, &[]);
+    Job::declare(&tc, 1, &coinbase, &[]).send(&mut c).await;
+    expect_job_error(&mut c, 1, "time-too-new").await;
+
+    tc.chain.clock.set_mock(i64::from(now + 1));
+    Job::declare(&tc, 2, &coinbase, &[]).send(&mut c).await;
+    expect_job_success(&mut c, &tc, 2, 1, 0).await;
+    tp.shutdown().await;
+}
+
 /// Moves the store tip one empty block on, as a peer's block would.
 fn advance_tip(tc: &TestChain) {
     let tip = tc.chain.tip_header().expect("tip");
